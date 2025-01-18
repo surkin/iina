@@ -7,6 +7,7 @@
 //
 
 import Cocoa
+import UniformTypeIdentifiers
 
 class PrefUtilsViewController: PreferenceViewController, PreferenceWindowEmbeddable {
 
@@ -19,14 +20,15 @@ class PrefUtilsViewController: PreferenceViewController, PreferenceWindowEmbedda
   }
 
   var preferenceTabImage: NSImage {
-    return NSImage(named: NSImage.Name("pref_utils"))!
+    return makeSymbol("wrench.and.screwdriver", fallbackImage: "pref_utils")
   }
 
   override var sectionViews: [NSView] {
-    return [sectionDefaultAppView, sectionClearCacheView, sectionBrowserExtView]
+    return [sectionDefaultAppView, sectionRestoreAlertsView, sectionClearCacheView, sectionBrowserExtView]
   }
 
   @IBOutlet var sectionDefaultAppView: NSView!
+  @IBOutlet var sectionRestoreAlertsView: NSView!
   @IBOutlet var sectionClearCacheView: NSView!
   @IBOutlet var sectionBrowserExtView: NSView!
   @IBOutlet var setAsDefaultSheet: NSWindow!
@@ -36,6 +38,7 @@ class PrefUtilsViewController: PreferenceViewController, PreferenceWindowEmbedda
   @IBOutlet weak var thumbCacheSizeLabel: NSTextField!
   @IBOutlet weak var savedPlaybackProgressClearedLabel: NSTextField!
   @IBOutlet weak var playHistoryClearedLabel: NSTextField!
+  @IBOutlet weak var restoreAlertsRestoredLabel: NSTextField!
 
   override func viewDidLoad() {
     super.viewDidLoad()
@@ -56,11 +59,11 @@ class PrefUtilsViewController: PreferenceViewController, PreferenceWindowEmbedda
   @IBAction func setAsDefaultOKBtnAction(_ sender: Any) {
 
     guard
-      let utiTypes = Bundle.main.infoDictionary?["UTImportedTypeDeclarations"] as? [[String: Any]],
+      let utiImportedTypes = Bundle.main.infoDictionary?["UTImportedTypeDeclarations"] as? [[String: Any]],
       let cfBundleID = Bundle.main.bundleIdentifier as CFString?
       else { return }
 
-    Logger.log("Set self as default")
+    Logger.log("Setting this app as default")
 
     var successCount = 0
     var failedCount = 0
@@ -71,13 +74,15 @@ class PrefUtilsViewController: PreferenceViewController, PreferenceWindowEmbedda
       "public.text": setAsDefaultPlaylistCheckBox.state == .on
     ]
 
-    for utiType in utiTypes {
+    var utiTargetSet: Set<String> = []
+    for utiImportedType in utiImportedTypes {
       guard
-        let conformsTo = utiType["UTTypeConformsTo"] as? [String],
-        let tagSpec = utiType["UTTypeTagSpecification"] as? [String: Any],
+        let identifier = utiImportedType["UTTypeIdentifier"] as? String,
+        let conformsTo = utiImportedType["UTTypeConformsTo"] as? [String],
+        let tagSpec = utiImportedType["UTTypeTagSpecification"] as? [String: Any],
         let exts = tagSpec["public.filename-extension"] as? [String]
-        else {
-          return
+      else {
+        return
       }
 
       // make sure that `conformsTo` contains a checked UTI type
@@ -85,15 +90,31 @@ class PrefUtilsViewController: PreferenceViewController, PreferenceWindowEmbedda
         continue
       }
 
+      Logger.log("UTImportedType: \(identifier.quoted) ➤ \(exts)", level: .verbose)
       for ext in exts {
-        let utiString = UTTypeCreatePreferredIdentifierForTag(kUTTagClassFilenameExtension, ext as CFString, nil)!.takeUnretainedValue()
-        let status = LSSetDefaultRoleHandlerForContentType(utiString, .all, cfBundleID)
-        if status == kOSReturnSuccess {
-          successCount += 1
+        if #available(macOS 11.0, *) {
+          let uttypesForExt = UTType.types(tag: ext, tagClass: .filenameExtension, conformingTo: nil)
+          for uttype in uttypesForExt {
+            utiTargetSet.insert(uttype.identifier)
+          }
         } else {
-          Logger.log("failed for \(ext): return value \(status)", level: .error)
-          failedCount += 1
+          let unmanagedArray = UTTypeCreateAllIdentifiersForTag(kUTTagClassFilenameExtension, ext as CFString, nil)
+          let utiArray = unmanagedArray!.takeUnretainedValue() as NSArray as! [String]
+          for uti in utiArray {
+            utiTargetSet.insert(uti)
+          }
         }
+      }
+    }
+
+    for identifier in utiTargetSet {
+      Logger.log("Setting default for UTI: \(identifier.quoted)", level: .verbose)
+      let status = LSSetDefaultRoleHandlerForContentType(identifier as CFString, .all, cfBundleID)
+      if status == kOSReturnSuccess {
+        successCount += 1
+      } else {
+        Logger.log("Failed for \(identifier.quoted): return value \(status)", level: .error)
+        failedCount += 1
       }
     }
 
@@ -104,6 +125,16 @@ class PrefUtilsViewController: PreferenceViewController, PreferenceWindowEmbedda
 
   @IBAction func setAsDefaultCancelBtnAction(_ sender: Any) {
     view.window!.endSheet(setAsDefaultSheet)
+  }
+
+  @IBAction func resetSuppressedAlertsBtnAction(_ sender: Any) {
+    Utility.quickAskPanel("restore_alerts", sheetWindow: view.window) { respond in
+      guard respond == .alertFirstButtonReturn else { return }
+      // This operation used to restore an alert about preventing display sleeping failing. That
+      // alert has been removed so at this time we do not have any alerts that can be suppressed.
+      // That might change in the future, so for now we are retaining this operation.
+      self.restoreAlertsRestoredLabel.isHidden = false
+    }
   }
 
   @IBAction func clearWatchLaterBtnAction(_ sender: Any) {
@@ -119,7 +150,7 @@ class PrefUtilsViewController: PreferenceViewController, PreferenceWindowEmbedda
     Utility.quickAskPanel("clear_history", sheetWindow: view.window) { respond in
       guard respond == .alertFirstButtonReturn else { return }
       try? FileManager.default.removeItem(atPath: Utility.playbackHistoryURL.path)
-      NSDocumentController.shared.clearRecentDocuments(self)
+      AppDelegate.shared.clearRecentDocuments(self)
       Preference.set(nil, for: .iinaLastPlayedFilePath)
       self.playHistoryClearedLabel.isHidden = false
     }

@@ -1,5 +1,5 @@
 //
-//  ISO639_2Helper.swift
+//  ISO639_Helper.swift
 //  iina
 //
 //  Created by lhc on 14/3/2017.
@@ -10,7 +10,6 @@ import Foundation
 
 
 class ISO639Helper {
-
   struct Language {
     var code: String
     var name: [String]
@@ -20,12 +19,16 @@ class ISO639Helper {
     }
   }
 
+  static let descriptionRegex = Regex("^.+?\\(([a-z]{2,3})\\)$")
+
   static let languages: [Language] = {
     var result: [Language] = []
     for (k, v) in dictionary {
       let names = v.split(separator: ";").map { String($0) }
       result.append(Language(code: k, name: names))
     }
+    // Sort by description, ascending alpha order
+    result.sort{$0.description.localizedCompare($1.description) == .orderedAscending}
     return result
   }()
 
@@ -33,5 +36,4 @@ class ISO639Helper {
     let filePath = Bundle.main.path(forResource: "ISO639", ofType: "strings")!
     return NSDictionary(contentsOfFile: filePath) as! [String : String]
   }()
-
 }

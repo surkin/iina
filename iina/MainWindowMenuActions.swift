@@ -11,68 +11,23 @@ import Cocoa
 extension MainWindowController {
 
   @objc func menuShowPlaylistPanel(_ sender: NSMenuItem) {
-    if sideBarStatus == .hidden || sideBarStatus == .settings {
-      playlistView.pleaseSwitchToTab(.playlist)
-      playlistButtonAction(sender)
-    } else {
-      if playlistView.currentTab != .playlist {
-        playlistView.pleaseSwitchToTab(.playlist)
-      } else {
-        playlistButtonAction(sender)
-      }
-    }
+    showPlaylistSidebar(tab: .playlist)
   }
 
   @objc func menuShowChaptersPanel(_ sender: NSMenuItem) {
-    if sideBarStatus == .hidden || sideBarStatus == .settings {
-      playlistView.pleaseSwitchToTab(.chapters)
-      playlistButtonAction(sender)
-    } else {
-      if playlistView.currentTab != .chapters {
-        playlistView.pleaseSwitchToTab(.chapters)
-      } else {
-        playlistButtonAction(sender)
-      }
-    }
+    showPlaylistSidebar(tab: .chapters)
   }
 
   @objc func menuShowVideoQuickSettings(_ sender: NSMenuItem) {
-    if sideBarStatus == .hidden || sideBarStatus == .playlist {
-      quickSettingView.pleaseSwitchToTab(.video)
-      settingsButtonAction(sender)
-    } else {
-      if quickSettingView.currentTab != .video {
-        quickSettingView.pleaseSwitchToTab(.video)
-      } else {
-        settingsButtonAction(sender)
-      }
-    }
+    showSettingsSidebar(tab: .video)
   }
 
   @objc func menuShowAudioQuickSettings(_ sender: NSMenuItem) {
-    if sideBarStatus == .hidden || sideBarStatus == .playlist {
-      quickSettingView.pleaseSwitchToTab(.audio)
-      settingsButtonAction(sender)
-    } else {
-      if quickSettingView.currentTab != .audio {
-        quickSettingView.pleaseSwitchToTab(.audio)
-      } else {
-        settingsButtonAction(sender)
-      }
-    }
+    showSettingsSidebar(tab: .audio)
   }
 
   @objc func menuShowSubQuickSettings(_ sender: NSMenuItem) {
-    if sideBarStatus == .hidden || sideBarStatus == .playlist {
-      quickSettingView.pleaseSwitchToTab(.sub)
-      settingsButtonAction(sender)
-    } else {
-      if quickSettingView.currentTab != .sub {
-        quickSettingView.pleaseSwitchToTab(.sub)
-      } else {
-        settingsButtonAction(sender)
-      }
-    }
+    showSettingsSidebar(tab: .sub)
   }
 
   @objc func menuChangeWindowSize(_ sender: NSMenuItem) {
@@ -113,11 +68,9 @@ extension MainWindowController {
   }
 
   @objc func menuAlwaysOnTop(_ sender: AnyObject) {
-    isOntop = !isOntop
-    setWindowFloatingOnTop(isOntop)
+    setWindowFloatingOnTop(!isOntop)
   }
 
-  @available(macOS 10.12, *)
   @objc func menuTogglePIP(_ sender: NSMenuItem) {
     switch pipStatus {
     case .notInPIP:
@@ -147,48 +100,6 @@ extension MainWindowController {
       self.hideSideBar {
         self.enterInteractiveMode(.freeSelecting)
       }
-    }
-  }
-
-  @objc
-  func menuToggleVideoFilterString(_ sender: NSMenuItem) {
-    if let string = (sender.representedObject as? String) {
-      menuToggleFilterString(string, forType: MPVProperty.vf)
-    }
-  }
-
-  @objc
-  func menuToggleAudioFilterString(_ sender: NSMenuItem) {
-    if let string = (sender.representedObject as? String) {
-      menuToggleFilterString(string, forType: MPVProperty.af)
-    }
-  }
-
-  private func menuToggleFilterString(_ string: String, forType type: String) {
-    let isVideo = type == MPVProperty.vf
-    if let filter = MPVFilter(rawString: string) {
-      if player.mpv.getFilters(type).contains(where: { $0.stringFormat == string }) {
-        // remove
-        if isVideo {
-          _ = player.removeVideoFilter(filter)
-        } else {
-          _ = player.removeAudioFilter(filter)
-        }
-      } else {
-        // add
-        if isVideo {
-          if !player.addVideoFilter(filter) {
-            Utility.showAlert("filter.incorrect")
-          }
-        } else {
-          if !player.addAudioFilter(filter) {
-            Utility.showAlert("filter.incorrect")
-          }
-        }
-      }
-    }
-    if let vfWindow = (NSApp.delegate as? AppDelegate)?.vfWindow, vfWindow.loaded {
-      vfWindow.reloadTable()
     }
   }
 }

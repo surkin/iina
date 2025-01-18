@@ -8,8 +8,7 @@
 
 import Foundation
 
-fileprivate let charSetGroups: [CharacterSet] = [.decimalDigits, .letters]
-fileprivate let subsystem = Logger.Subsystem(rawValue: "fgroup")
+fileprivate let subsystem = Logger.makeSubsystem("fgroup")
 
 class FileInfo: Hashable {
   var url: URL
@@ -21,7 +20,7 @@ class FileInfo: Hashable {
   var dist: [FileInfo: UInt] = [:]
   var minDist: [FileInfo] = []
   var relatedSubs: [FileInfo] = []
-  var priorityStringOccurances = 0
+  var priorityStringOccurrences = 0
   var isMatched = false
 
   var prefix: String {  // prefix detected by FileGroup
@@ -108,7 +107,8 @@ class FileGroup {
     var i = prefix.count
 
     while tempGroup.count < 2 {
-      var lastPrefix = ""
+      var lastPrefix = prefix
+      var anyProcessed = false
       for finfo in contents {
         // if reached string end
         if i >= finfo.characters.count {
@@ -125,6 +125,7 @@ class FileGroup {
           currChars.append((c, p))
         }
         tempGroup[p]!.append(finfo)
+        anyProcessed = true
       }
       // if all items have the same prefix
       if tempGroup.count == 1 {
@@ -133,11 +134,15 @@ class FileGroup {
         currChars.removeAll()
       }
       i += 1
+      // if all items have the same name
+      if !anyProcessed {
+        break
+      }
     }
 
     let maxSubGroupCount = tempGroup.reduce(0, { max($0, $1.value.count) })
     if stopGrouping(currChars) || maxSubGroupCount < 3 {
-      Logger.log("Stop groupping, maxSubGroup=\(maxSubGroupCount)", level: .verbose, subsystem: subsystem)
+      Logger.log("Stop grouping, maxSubGroup=\(maxSubGroupCount)", level: .verbose, subsystem: subsystem)
       contents.forEach { $0.prefix = self.prefix }
     } else {
       Logger.log("Continue grouping, groups=\(tempGroup.count), chars=\(currChars)", level: .verbose, subsystem: subsystem)
@@ -151,8 +156,7 @@ class FileGroup {
 
   func flatten() -> [String: [FileInfo]] {
     var result: [String: [FileInfo]] = [:]
-    var search: ((FileGroup) -> Void)!
-    search = { group in
+    func search(_ group: FileGroup) {
       if group.groups.count > 0 {
         for g in group.groups {
           search(g)

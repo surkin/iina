@@ -23,7 +23,11 @@ class PrefAdvancedViewController: PreferenceViewController, PreferenceWindowEmbe
   }
 
   var preferenceTabImage: NSImage {
-    return NSImage(named: NSImage.Name("pref_advanced"))!
+    return makeSymbol("flask", fallbackImage: "pref_advanced")
+  }
+
+  var preferenceContentIsScrollable: Bool {
+    return false
   }
 
   var hasResizableWidth: Bool = false
@@ -31,13 +35,14 @@ class PrefAdvancedViewController: PreferenceViewController, PreferenceWindowEmbe
   var options: [[String]] = []
 
   override var sectionViews: [NSView] {
-    return [headerView, settingsView]
+    return [headerView, loggingSettingsView, mpvSettingsView]
   }
 
   @IBOutlet var headerView: NSView!
-  @IBOutlet var settingsView: NSView!
+  @IBOutlet var loggingSettingsView: NSView!
+  @IBOutlet var mpvSettingsView: NSView!
 
-  @IBOutlet weak var enableSettingsBtn: NSButton!
+  @IBOutlet weak var enableAdvancedSettingsLabel: NSTextField!
   @IBOutlet weak var optionsTableView: NSTableView!
   @IBOutlet weak var useAnotherConfigDirBtn: NSButton!
   @IBOutlet weak var chooseConfigDirBtn: NSButton!
@@ -54,7 +59,10 @@ class PrefAdvancedViewController: PreferenceViewController, PreferenceWindowEmbe
 
     optionsTableView.dataSource = self
     optionsTableView.delegate = self
+    optionsTableView.sizeLastColumnToFit()
     removeButton.isEnabled = false
+    
+    enableAdvancedSettingsLabel.stringValue = NSLocalizedString("preference.enable_adv_settings", comment: "Enable advanced settings")
   }
 
   func saveToUserDefaults() {
@@ -64,8 +72,12 @@ class PrefAdvancedViewController: PreferenceViewController, PreferenceWindowEmbe
 
   // MARK: - IBAction
 
-  @IBAction func revealLogDir(_ sender: AnyObject) {
-    NSWorkspace.shared.open(Utility.logDirURL)
+  @IBAction func openLogDir(_ sender: AnyObject) {
+    NSWorkspace.shared.open(Logger.logDirectory)
+  }
+  
+  @IBAction func showLogWindow(_ sender: AnyObject) {
+    AppDelegate.shared.logWindow.showWindow(self)
   }
 
   @IBAction func addOptionBtnAction(_ sender: AnyObject) {

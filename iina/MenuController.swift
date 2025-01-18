@@ -8,41 +8,70 @@
 
 import Cocoa
 
-fileprivate func sameKeyAction(_ lhs: [String], _ rhs: [String], _ normalizeLastNum: Bool, _ numRange: ClosedRange<Double>?) -> (Bool, Double?) {
+fileprivate func sameKeyAction(_ lhs: [String], _ rhs: [String], _ normalizeLastNum: Bool, _ numRange: ClosedRange<Double>?) -> (Bool, Double?, Any?) {
   var lhs = lhs
-  if lhs.first == "seek" && (lhs.last == "exact" || lhs.last == "keyframe") {
-    lhs = [String](lhs.dropLast())
+  var extraData: Any? = nil
+  if lhs.first == "seek", rhs.first == "seek", lhs.count > 2, let last = lhs.last {
+    // This is a seek command that includes flags. Adjust the command before checking for a match.
+    if lhs.count == 4 {
+      // The original mpv seek command required that the keyframes and exact flags be passed as a
+      // 3rd parameter. This is considered deprecated but still supported by mpv. Convert this to
+      // the current command format by combining the flags using a "+" separator.
+      lhs[2] = "\(lhs[2])+\(lhs[3])"
+      lhs = [String](lhs.dropLast())
+    }
+    var splitArray = last.split(whereSeparator: { $0 == "+" })
+    if let index = splitArray.firstIndex(of: "relative") {
+      // The mpv seek command seeks relative to current position by default. Because of that the
+      // seek command used by menu items does not specify this flag. Ignore it when checking for a
+      // match.
+      splitArray.remove(at: index)
+    }
+    if let index = splitArray.firstIndex(of: "exact") {
+      // Alter the behavior of the menu item by passing this flag on the side as extra data.
+      splitArray.remove(at: index)
+      extraData = Preference.SeekOption.exact
+    }
+    // NOTE at this time PlayerCore does not support specifying the keyframes flag, so it can't
+    // be specified on the side as extra data as is done for exact. Although the mpv seek command
+    // normally defaults to seeking by keyframes, that default can be changed by the hr-seek option.
+    // When hr-seek has been set to enable exact seeks by default the keyframes flag will override
+    // that default.
+    if splitArray.isEmpty {
+      // All flags were recognized as ones we do not need to consider when checking for a match.
+      lhs = [String](lhs.dropLast())
+    }
   }
   guard lhs.count > 0 && lhs.count == rhs.count else {
-    return (false, nil)
+    return (false, nil, nil)
   }
   if normalizeLastNum {
     for i in 0..<lhs.count-1 {
       if lhs[i] != rhs[i] {
-        return (false, nil)
+        return (false, nil, nil)
       }
     }
     guard let ld = Double(lhs.last!), let rd = Double(rhs.last!) else {
-      return (false, nil)
+      return (false, nil, nil)
     }
     if let range = numRange {
-      return (range.contains(ld), ld)
+      return (range.contains(ld), ld, extraData)
     } else {
-      return (ld == rd, ld)
+      return (ld == rd, ld, extraData)
     }
   } else {
     for i in 0..<lhs.count {
       if lhs[i] != rhs[i] {
-        return (false, nil)
+        return (false, nil, nil)
       }
     }
   }
-  return (true, nil)
+  return (true, nil, nil)
 }
 
 class MenuController: NSObject, NSMenuDelegate {
 
-  /** For convinent bindings. see `bind(...)` below. [menu: check state block] */
+  /** For convenient bindings. see `bind(...)` below. [menu: check state block] */
   private var menuBindingList: [NSMenu: (NSMenuItem) -> Bool] = [:]
 
   private var stringForOpen: String!
@@ -57,9 +86,11 @@ class MenuController: NSObject, NSMenuDelegate {
   @IBOutlet weak var openURL: NSMenuItem!
   @IBOutlet weak var openURLAlternative: NSMenuItem!
   @IBOutlet weak var savePlaylist: NSMenuItem!
+  @IBOutlet weak var showCurrentFileInFinder: NSMenuItem!
   @IBOutlet weak var deleteCurrentFile: NSMenuItem!
   @IBOutlet weak var newWindow: NSMenuItem!
   @IBOutlet weak var newWindowSeparator: NSMenuItem!
+  @IBOutlet weak var otherKeyBindingsMenu: NSMenu!
   // Playback
   @IBOutlet weak var playbackMenu: NSMenu!
   @IBOutlet weak var pause: NSMenuItem!
@@ -123,6 +154,7 @@ class MenuController: NSObject, NSMenuDelegate {
   @IBOutlet weak var quickSettingsAudio: NSMenuItem!
   @IBOutlet weak var cycleAudioTracks: NSMenuItem!
   @IBOutlet weak var audioTrackMenu: NSMenu!
+  @IBOutlet weak var loadExternalAudio: NSMenuItem!
   @IBOutlet weak var volumeIndicator: NSMenuItem!
   @IBOutlet weak var increaseVolume: NSMenuItem!
   @IBOutlet weak var increaseVolumeSlightly: NSMenuItem!
@@ -141,6 +173,8 @@ class MenuController: NSObject, NSMenuDelegate {
   // Subtitle
   @IBOutlet weak var subMenu: NSMenu!
   @IBOutlet weak var quickSettingsSub: NSMenuItem!
+  @IBOutlet weak var hideSubtitles: NSMenuItem!
+  @IBOutlet weak var hideSecondSubtitles: NSMenuItem!
   @IBOutlet weak var cycleSubtitles: NSMenuItem!
   @IBOutlet weak var subTrackMenu: NSMenu!
   @IBOutlet weak var secondSubTrackMenu: NSMenu!
@@ -157,12 +191,18 @@ class MenuController: NSObject, NSMenuDelegate {
   @IBOutlet weak var encodingMenu: NSMenu!
   @IBOutlet weak var subFont: NSMenuItem!
   @IBOutlet weak var findOnlineSub: NSMenuItem!
+  @IBOutlet weak var onlineSubSourceMenu: NSMenu!
   @IBOutlet weak var saveDownloadedSub: NSMenuItem!
+  // Plugin
+  @IBOutlet weak var pluginMenu: NSMenu!
+  @IBOutlet weak var pluginMenuItem: NSMenuItem!
   // Window
   @IBOutlet weak var customTouchBar: NSMenuItem!
   @IBOutlet weak var inspector: NSMenuItem!
   @IBOutlet weak var miniPlayer: NSMenuItem!
 
+  /// If `true` then all menu items are disabled.
+  private var isDisabled = false
 
   // MARK: - Construct Menus
 
@@ -182,12 +222,15 @@ class MenuController: NSObject, NSMenuDelegate {
     stringForOpenURLAlternative = openURLAlternative.title
 
     savePlaylist.action = #selector(MainMenuActionHandler.menuSavePlaylist(_:))
+    showCurrentFileInFinder.action = #selector(MainMenuActionHandler.menuShowCurrentFileInFinder(_:))
     deleteCurrentFile.action = #selector(MainMenuActionHandler.menuDeleteCurrentFile(_:))
 
     if Preference.bool(for: .enableCmdN) {
       newWindowSeparator.isHidden = false
       newWindow.isHidden = false
     }
+
+    otherKeyBindingsMenu.delegate = self
 
     // Playback menu
 
@@ -205,10 +248,6 @@ class MenuController: NSObject, NSMenuDelegate {
     jumpTo.action = #selector(MainMenuActionHandler.menuJumpTo(_:))
 
     // -- speed
-    (speedUp.representedObject,
-     speedUpSlightly.representedObject,
-     speedDown.representedObject,
-     speedDownSlightly.representedObject) = (2.0, 1.1, 0.5, 0.9)
     [speedUp, speedDown, speedUpSlightly, speedDownSlightly, speedReset].forEach { item in
       item?.action = #selector(MainMenuActionHandler.menuChangeSpeed(_:))
     }
@@ -248,11 +287,7 @@ class MenuController: NSObject, NSMenuDelegate {
 
     // -- screen
     fullScreen.action = #selector(MainWindowController.menuToggleFullScreen(_:))
-    if #available(macOS 10.12, *) {
-      pictureInPicture.action = #selector(MainWindowController.menuTogglePIP(_:))
-    } else {
-      videoMenu.removeItem(pictureInPicture)
-    }
+    pictureInPicture.action = #selector(MainWindowController.menuTogglePIP(_:))
     alwaysOnTop.action = #selector(MainWindowController.menuAlwaysOnTop(_:))
 
     // -- aspect
@@ -271,9 +306,14 @@ class MenuController: NSObject, NSMenuDelegate {
     var cropListForObject = AppData.aspects
     cropList.insert(Constants.String.none, at: 0)
     cropListForObject.insert("None", at: 0)
+    // Allow custom crop size.
+    cropList.append(Constants.String.custom)
+    cropListForObject.append("Custom")
     bind(menu: cropMenu, withOptions: cropList, objects: cropListForObject, objectMap: nil, action: #selector(MainMenuActionHandler.menuChangeCrop(_:))) {
       return PlayerCore.active.info.unsureCrop == $0.representedObject as? String
     }
+    // Separate "Custom..." from other crop sizes.
+    cropMenu.insertItem(NSMenuItem.separator(), at: 1 + AppData.aspects.count)
 
     // -- rotation
     let rotationTitles = AppData.rotations.map { "\($0)\(Constants.String.degree)" }
@@ -304,22 +344,15 @@ class MenuController: NSObject, NSMenuDelegate {
     audioMenu.delegate = self
     quickSettingsAudio.action = #selector(MainWindowController.menuShowAudioQuickSettings(_:))
     audioTrackMenu.delegate = self
+    loadExternalAudio.action = #selector(MainMenuActionHandler.menuLoadExternalAudio(_:))
 
     // - volume
-    (increaseVolume.representedObject,
-     decreaseVolume.representedObject,
-     increaseVolumeSlightly.representedObject,
-     decreaseVolumeSlightly.representedObject) = (5, -5, 1, -1)
     [increaseVolume, decreaseVolume, increaseVolumeSlightly, decreaseVolumeSlightly].forEach { item in
       item?.action = #selector(MainMenuActionHandler.menuChangeVolume(_:))
     }
     mute.action = #selector(MainMenuActionHandler.menuToggleMute(_:))
 
     // - audio delay
-    (increaseAudioDelay.representedObject,
-     increaseAudioDelaySlightly.representedObject,
-     decreaseAudioDelay.representedObject,
-     decreaseAudioDelaySlightly.representedObject) = (0.5, 0.1, -0.5, -0.1)
     [increaseAudioDelay, decreaseAudioDelay, increaseAudioDelaySlightly, decreaseAudioDelaySlightly].forEach { item in
       item?.action = #selector(MainMenuActionHandler.menuChangeAudioDelay(_:))
     }
@@ -341,10 +374,14 @@ class MenuController: NSObject, NSMenuDelegate {
     quickSettingsSub.action = #selector(MainWindowController.menuShowSubQuickSettings(_:))
     loadExternalSub.action = #selector(MainMenuActionHandler.menuLoadExternalSub(_:))
     subTrackMenu.delegate = self
+    hideSubtitles.action = #selector(MainMenuActionHandler.menuToggleSubVisibility(_:))
+    hideSecondSubtitles.action = #selector(MainMenuActionHandler.menuToggleSecondSubVisibility(_:))
     secondSubTrackMenu.delegate = self
 
     findOnlineSub.action = #selector(MainMenuActionHandler.menuFindOnlineSub(_:))
     saveDownloadedSub.action = #selector(MainMenuActionHandler.saveDownloadedSub(_:))
+
+    onlineSubSourceMenu.delegate = self
 
     // - text size
     [increaseTextSize, decreaseTextSize, resetTextSize].forEach {
@@ -352,10 +389,6 @@ class MenuController: NSObject, NSMenuDelegate {
     }
 
     // - delay
-    (increaseSubDelay.representedObject,
-     increaseSubDelaySlightly.representedObject,
-     decreaseSubDelay.representedObject,
-     decreaseSubDelaySlightly.representedObject) = (0.5, 0.1, -0.5, -0.1)
     [increaseSubDelay, decreaseSubDelay, increaseSubDelaySlightly, decreaseSubDelaySlightly].forEach { item in
       item?.action = #selector(MainMenuActionHandler.menuChangeSubDelay(_:))
     }
@@ -371,13 +404,17 @@ class MenuController: NSObject, NSMenuDelegate {
     // Separate Auto from other encoding types
     encodingMenu.insertItem(NSMenuItem.separator(), at: 1)
 
+    // Plugin
+
+    if IINA_ENABLE_PLUGIN_SYSTEM {
+      pluginMenu.delegate = self
+    } else {
+      pluginMenuItem.isHidden = true
+    }
+
     // Window
 
-    if #available(macOS 10.12.2, *) {
-      customTouchBar.action = #selector(NSApplication.toggleTouchBarCustomizationPalette(_:))
-    } else {
-      customTouchBar.isHidden = true
-    }
+    customTouchBar.action = #selector(NSApplication.toggleTouchBarCustomizationPalette(_:))
 
     inspector.action = #selector(MainMenuActionHandler.menuShowInspector(_:))
     miniPlayer.action = #selector(MainWindowController.menuSwitchToMiniPlayer(_:))
@@ -385,26 +422,36 @@ class MenuController: NSObject, NSMenuDelegate {
 
   // MARK: - Update Menus
 
+  func updateOtherKeyBindings(replacingAllWith newItems: [NSMenuItem]) {
+    otherKeyBindingsMenu.removeAllItems()
+    for item in newItems {
+      otherKeyBindingsMenu.addItem(item)
+    }
+  }
+
   private func updatePlaylist() {
     playlistMenu.removeAllItems()
-    for (index, item) in PlayerCore.active.info.playlist.enumerated() {
-      playlistMenu.addItem(withTitle: item.filenameForDisplay, action: #selector(MainMenuActionHandler.menuPlaylistItem(_:)),
-                           tag: index, obj: nil, stateOn: item.isCurrent)
+    PlayerCore.active.info.$playlist.withLock { playlist in
+      for (index, item) in playlist.enumerated() {
+        playlistMenu.addItem(withTitle: item.filenameForDisplay, action: #selector(MainMenuActionHandler.menuPlaylistItem(_:)),
+                             tag: index, obj: nil, stateOn: item.isCurrent)
+      }
     }
   }
 
   private func updateChapterList() {
     chapterMenu.removeAllItems()
     let info = PlayerCore.active.info
+    let chapters = info.chapters
     let padder = { (time: String) -> String in
-      let standard = (info.chapters.last?.time.stringRepresentation ?? "").reversed()
+      let standard = (chapters.last?.time.stringRepresentation ?? "").reversed()
       return String((time.reversed() + standard[standard.index(standard.startIndex, offsetBy: time.count)...].map {
         $0 == ":" ? ":" : "0"
       }).reversed())
     }
-    for (index, chapter) in info.chapters.enumerated() {
+    for (index, chapter) in chapters.enumerated() {
       let menuTitle = "\(padder(chapter.time.stringRepresentation)) – \(chapter.title)"
-      let nextChapterTime = info.chapters[at: index+1]?.time ?? Constants.Time.infinite
+      let nextChapterTime = chapters[at: index+1]?.time ?? Constants.Time.infinite
       let isPlaying = info.videoPosition?.between(chapter.time, nextChapterTime) ?? false
       let menuItem = NSMenuItem(title: menuTitle, action: #selector(MainMenuActionHandler.menuChapterSwitch(_:)), keyEquivalent: "")
       menuItem.tag = index
@@ -431,29 +478,54 @@ class MenuController: NSObject, NSMenuDelegate {
 
   private func updatePlaybackMenu() {
     let player = PlayerCore.active
-    pause.title = player.info.isPaused ? Constants.String.resume : Constants.String.pause
-    let isLoop = player.mpv.getFlag(MPVOption.PlaybackControl.loopFile)
-    fileLoop.state = isLoop ? .on : .off
-    let isPlaylistLoop = player.mpv.getString(MPVOption.PlaybackControl.loopPlaylist)
-    playlistLoop.state = (isPlaylistLoop == "inf" || isPlaylistLoop == "force") ? .on : .off
-    speedIndicator.title = String(format: NSLocalizedString("menu.speed", comment: "Speed:"), player.info.playSpeed)
+    let isDisplayingPlaylist = player.mainWindow.sideBarStatus == .playlist &&
+          player.mainWindow.playlistView.currentTab == .playlist
+    playlistPanel?.title = isDisplayingPlaylist ? Constants.String.hidePlaylistPanel : Constants.String.playlistPanel
+    let isDisplayingChapters = player.mainWindow.sideBarStatus == .playlist &&
+          player.mainWindow.playlistView.currentTab == .chapters
+    chapterPanel?.title = isDisplayingChapters ? Constants.String.hideChaptersPanel : Constants.String.chaptersPanel
+    pause.title = player.info.state == .paused ? Constants.String.resume : Constants.String.pause
+    abLoop.state = player.isABLoopActive ? .on : .off
+    let loopMode = player.getLoopMode()
+    fileLoop.state = loopMode == .file ? .on : .off
+    playlistLoop.state = loopMode == .playlist ? .on : .off
+    let speed = player.info.playSpeed.string
+    speedIndicator.title = String(format: NSLocalizedString("menu.speed", comment: "Speed:"), speed)
   }
 
   private func updateVideoMenu() {
-    let isInFullScreen = PlayerCore.active.mainWindow.fsState.isFullscreen
-    let isInPIP = PlayerCore.active.mainWindow.pipStatus == .inPIP
-    let isOntop = PlayerCore.active.isInMiniPlayer ? PlayerCore.active.miniPlayer.isOntop : PlayerCore.active.mainWindow.isOntop
-    let isDelogo = PlayerCore.active.info.delogoFilter != nil
+    let player = PlayerCore.active
+    let isDisplayingSettings = player.mainWindow.sideBarStatus == .settings &&
+          player.mainWindow.quickSettingView.currentTab == .video
+    quickSettingsVideo?.title = isDisplayingSettings ? Constants.String.hideVideoPanel :
+        Constants.String.videoPanel
+    let isInFullScreen = player.mainWindow.fsState.isFullscreen
+    let isInPIP = player.mainWindow.pipStatus == .inPIP
+    let isOntop = player.isInMiniPlayer ? player.miniPlayer.isOntop : player.mainWindow.isOntop
+    let isDelogo = player.info.delogoFilter != nil
     alwaysOnTop.state = isOntop ? .on : .off
-    deinterlace.state = PlayerCore.active.info.deinterlace ? .on : .off
+    deinterlace.state = player.info.deinterlace ? .on : .off
     fullScreen.title = isInFullScreen ? Constants.String.exitFullScreen : Constants.String.fullScreen
     pictureInPicture?.title = isInPIP ? Constants.String.exitPIP : Constants.String.pip
+    miniPlayer.title = player.isInMiniPlayer ? Constants.String.exitMiniPlayer : Constants.String.miniPlayer
     delogo.state = isDelogo ? .on : .off
   }
 
   private func updateAudioMenu() {
     let player = PlayerCore.active
-    volumeIndicator.title = String(format: NSLocalizedString("menu.volume", comment: "Volume:"), Int(player.info.volume))
+    let isDisplayingSettings = player.mainWindow.sideBarStatus == .settings &&
+          player.mainWindow.quickSettingView.currentTab == .audio
+    quickSettingsAudio?.title = isDisplayingSettings ? Constants.String.hideAudioPanel :
+        Constants.String.audioPanel
+    let volFmtString: String
+    if player.info.isMuted {
+      volFmtString = NSLocalizedString("menu.volume_muted", comment: "Volume: (Muted)")
+      mute.state = .on
+    } else {
+      volFmtString = NSLocalizedString("menu.volume", comment: "Volume:")
+      mute.state = .off
+    }
+    volumeIndicator.title = String(format: volFmtString, Int(player.info.volume))
     audioDelayIndicator.title = String(format: NSLocalizedString("menu.audio_delay", comment: "Audio Delay:"), player.info.audioDelay)
   }
 
@@ -476,6 +548,14 @@ class MenuController: NSObject, NSMenuDelegate {
 
   private func updateSubMenu() {
     let player = PlayerCore.active
+    let isDisplayingSettings = player.mainWindow.sideBarStatus == .settings &&
+          player.mainWindow.quickSettingView.currentTab == .sub
+    quickSettingsSub?.title = isDisplayingSettings ? Constants.String.hideSubtitlesPanel :
+        Constants.String.subtitlesPanel
+    hideSubtitles.title = player.info.isSubVisible ? Constants.String.hideSubtitles :
+        Constants.String.showSubtitles
+    hideSecondSubtitles.title = player.info.isSecondSubVisible ? Constants.String.hideSecondSubtitles :
+        Constants.String.showSecondSubtitles
     subDelayIndicator.title = String(format: NSLocalizedString("menu.sub_delay", comment: "Subtitle Delay:"), player.info.subDelay)
 
     let encodingCode = player.info.subEncoding ?? "auto"
@@ -484,16 +564,137 @@ class MenuController: NSObject, NSMenuDelegate {
         encodingMenu.item(withTitle: encoding.title)?.state = .on
       }
     }
+
+    let providerID = Preference.string(for: .onlineSubProvider) ?? OnlineSubtitle.Providers.openSub.id
+    let providerName = OnlineSubtitle.Providers.nameForID(providerID)
+    findOnlineSub.title = String(format: Constants.String.findOnlineSubtitles, providerName)
+  }
+
+  private func updateOnlineSubSourceMenu() {
+    OnlineSubtitle.populateMenu(onlineSubSourceMenu,
+                                action: #selector(MainMenuActionHandler.menuFindOnlineSub(_:)))
   }
 
   func updateSavedFiltersMenu(type: String) {
     let filters = PlayerCore.active.mpv.getFilters(type)
     let menu: NSMenu! = type == MPVProperty.vf ? savedVideoFiltersMenu : savedAudioFiltersMenu
     for item in menu.items {
-      if let string = (item.representedObject as? String) {
-        item.state = filters.contains { $0.stringFormat == string } ? .on : .off
+      if let string = (item.representedObject as? String), let asObject = MPVFilter(rawString: string) {
+        // Filters that support multiple parameters have more than one valid string representation.
+        // Must compare filters using their object representation.
+        item.state = filters.contains { $0 == asObject } ? .on : .off
       }
     }
+  }
+
+  func updatePluginMenu() {
+    let isDisplayingPluginsPanel = PlayerCore.active.mainWindow.sideBarStatus == .plugins
+    pluginMenu.removeAllItems()
+    pluginMenu.addItem(withTitle: Constants.String.managePlugins, action: #selector(AppDelegate.showPluginPreferences(_:)), keyEquivalent: "")
+    pluginMenu.addItem(withTitle: isDisplayingPluginsPanel ? Constants.String.hidePluginsPanel : Constants.String.showPluginsPanel, action: #selector(MainMenuActionHandler.showPluginsPanel(_:)), keyEquivalent: "")
+    pluginMenu.addItem(.separator())
+
+    let developerTool = NSMenuItem()
+    developerTool.title = NSLocalizedString("menu.developer_tool", comment: "Developer Tool")
+    developerTool.submenu = NSMenu()
+
+    var errorList: [(String, String)] = []
+    for (index, instance) in PlayerCore.active.plugins.enumerated() {
+      var counter = 0
+      var rootMenu: NSMenu! = pluginMenu
+      let menuItems = (instance.plugin.globalInstance?.menuItems ?? []) + instance.menuItems
+      if menuItems.isEmpty { continue }
+      
+      if index != 0 {
+        pluginMenu.addItem(.separator())
+      }
+
+      if #available(macOS 14.0, *) {
+        pluginMenu.addItem(.sectionHeader(title: instance.plugin.name))
+      } else {
+        pluginMenu.addItem(withTitle: instance.plugin.name, enabled: false)
+      }
+
+      for item in menuItems {
+        if counter == 5 {
+          Logger.log("Please avoid adding too much first-level menu items. IINA will only display the first 5 of them.",
+                     level: .warning, subsystem: instance.subsystem)
+          let moreItem = NSMenuItem()
+          moreItem.title = NSLocalizedString("menu.more_plugin", comment: "More…")
+          rootMenu = NSMenu()
+          moreItem.submenu = rootMenu
+          pluginMenu.addItem(moreItem)
+        }
+        add(menuItemDef: item, to: rootMenu, for: instance, errorList: &errorList)
+        counter += 1
+      }
+
+      if #available(macOS 12.0, *) {
+        let devToolItem = NSMenuItem()
+        devToolItem.title = instance.plugin.name
+        developerTool.submenu?.addItem(
+          menuItem(forPluginInstance: instance, tag: JavasctiptDevTool.JSMenuItemInstance))
+        if let globalInst = instance.plugin.globalInstance {
+          developerTool.submenu?.addItem(
+            menuItem(forPluginInstance: globalInst, tag: JavasctiptDevTool.JSMenuItemInstance))
+        }
+      }
+    }
+
+    if errorList.count > 0 {
+      let item = NSMenuItem(title: NSLocalizedString("menu.conflicting_shortcuts", comment: "Conflicting key shortcuts…"), action: nil, keyEquivalent: "")
+      if #available(macOS 14.0, *) {
+        item.badge = NSMenuItemBadge.alerts(count: errorList.count)
+      }
+      pluginMenu.insertItem(item, at: 0)
+    }
+
+    pluginMenu.addItem(.separator())
+    if #available(macOS 12.0, *) {
+      pluginMenu.addItem(developerTool)
+    }
+    pluginMenu.addItem(withTitle: NSLocalizedString("menu.reload_plugins", comment: "Reload All Plugins"), action: #selector(MainMenuActionHandler.reloadAllPlugins(_:)), keyEquivalent: "")
+  }
+
+  @discardableResult
+  private func add(menuItemDef item: JavascriptPluginMenuItem,
+                   to menu: NSMenu,
+                   for plugin: JavascriptPluginInstance,
+                   errorList: inout [(String, String)]) -> NSMenuItem {
+    if (item.isSeparator) {
+      let item = NSMenuItem.separator()
+      menu.addItem(item)
+      return item
+    }
+
+    let menuItem: NSMenuItem
+    if item.action == nil {
+      menuItem = menu.addItem(withTitle: item.title, action: nil, target: plugin, obj: item)
+    } else {
+      menuItem = menu.addItem(withTitle: item.title,
+                              action: #selector(plugin.menuItemAction(_:)),
+                              target: plugin,
+                              obj: item)
+    }
+
+    menuItem.isEnabled = item.enabled
+    menuItem.state = item.selected ? .on : .off
+    if let key = item.keyBinding {
+      if PlayerCore.keyBindings[key] != nil {
+        errorList.append((plugin.plugin.name, key))
+      } else if let (kEqv, kMdf) = KeyCodeHelper.macOSKeyEquivalent(from: key) {
+        menuItem.keyEquivalent = kEqv
+        menuItem.keyEquivalentModifierMask = kMdf
+      }
+    }
+    if !item.items.isEmpty {
+      menuItem.submenu = NSMenu()
+      for submenuItem in item.items {
+        add(menuItemDef: submenuItem, to: menuItem.submenu!, for: plugin, errorList: &errorList)
+      }
+    }
+    item.nsMenuItem = menuItem
+    return menuItem
   }
 
   /**
@@ -565,38 +766,46 @@ class MenuController: NSObject, NSMenuDelegate {
   // MARK: - Menu delegate
 
   func menuWillOpen(_ menu: NSMenu) {
-    if menu == fileMenu {
+    // If all menu items are disabled do not update the menus.
+    guard !isDisabled else { return }
+    switch menu {
+    case fileMenu:
       updateOpenMenuItems()
-    } else if menu == playlistMenu {
+    case playlistMenu:
       updatePlaylist()
-    } else if menu == chapterMenu {
+    case chapterMenu:
       updateChapterList()
-    } else if menu == playbackMenu {
+    case playbackMenu:
       updatePlaybackMenu()
-    } else if menu == videoMenu {
+    case videoMenu:
       updateVideoMenu()
-    } else if menu == videoTrackMenu {
+    case videoTrackMenu:
       updateTracks(forMenu: menu, type: .video)
-    } else if menu == flipMenu {
+    case flipMenu:
       updateFlipAndMirror()
-    } else if menu == audioMenu {
+    case audioMenu:
       updateAudioMenu()
-    } else if menu == audioTrackMenu {
+    case audioTrackMenu:
       updateTracks(forMenu: menu, type: .audio)
-    } else if menu == audioDeviceMenu {
+    case audioDeviceMenu:
       updateAudioDevice()
-    } else if menu == subMenu {
+    case subMenu:
       updateSubMenu()
-    } else if menu == subTrackMenu {
+    case subTrackMenu:
       updateTracks(forMenu: menu, type: .sub)
-    } else if menu == secondSubTrackMenu {
+    case secondSubTrackMenu:
       updateTracks(forMenu: menu, type: .secondSub)
-    } else if menu == savedVideoFiltersMenu {
+    case onlineSubSourceMenu:
+      updateOnlineSubSourceMenu()
+    case savedVideoFiltersMenu:
       updateSavedFiltersMenu(type: MPVProperty.vf)
-    } else if menu == savedAudioFiltersMenu {
+    case savedAudioFiltersMenu:
       updateSavedFiltersMenu(type: MPVProperty.af)
+    case pluginMenu:
+      updatePluginMenu()
+    default: break
     }
-    // check convinently binded menus
+    // check conveniently bound menus
     if let checkEnableBlock = menuBindingList[menu] {
       for item in menu.items {
         item.state = checkEnableBlock(item) ? .on : .off
@@ -613,7 +822,7 @@ class MenuController: NSObject, NSMenuDelegate {
     for filter in filters {
       let menuItem = NSMenuItem()
       menuItem.title = filter.name
-      menuItem.action = isVideo ? #selector(MainWindowController.menuToggleVideoFilterString(_:)) : #selector(MainWindowController.menuToggleAudioFilterString(_:))
+      menuItem.action = isVideo ? #selector(MainMenuActionHandler.menuToggleVideoFilterString(_:)) : #selector(MainMenuActionHandler.menuToggleAudioFilterString(_:))
       menuItem.keyEquivalent = filter.shortcutKey
       menuItem.keyEquivalentModifierMask = filter.shortcutKeyModifiers
       menuItem.representedObject = filter.filterString
@@ -622,20 +831,24 @@ class MenuController: NSObject, NSMenuDelegate {
   }
 
   func updateKeyEquivalentsFrom(_ keyBindings: [KeyMapping]) {
-    var settings: [(NSMenuItem, Bool, [String], Bool, ClosedRange<Double>?, String?)] = [
-      (deleteCurrentFile, true, ["delete-current-file"], false, nil, nil),
-      (savePlaylist, true, ["save-playlist"], false, nil, nil),
-      (quickSettingsVideo, true, ["video-panel"], false, nil, nil),
-      (quickSettingsAudio, true, ["audio-panel"], false, nil, nil),
-      (quickSettingsSub, true, ["sub-panel"], false, nil, nil),
-      (playlistPanel, true, ["playlist-panel"], false, nil, nil),
-      (chapterPanel, true, ["chapter-panel"], false, nil, nil),
-      (findOnlineSub, true, ["find-online-subs"], false, nil, nil),
-      (saveDownloadedSub, true, ["save-downloaded-sub"], false, nil, nil),
-      (biggerSize, true, ["bigger-window"], false, nil, nil),
-      (smallerSize, true, ["smaller-window"], false, nil, nil),
-      (fitToScreen, true, ["fit-to-screen"], false, nil, nil),
-      (miniPlayer, true, ["toggle-music-mode"], false, nil, nil),
+    let settings: [(NSMenuItem, Bool, [String], Bool, ClosedRange<Double>?, String?)] = [
+      (showCurrentFileInFinder, true, [IINACommand.showCurrentFileInFinder.rawValue], false, nil, nil),
+      (deleteCurrentFile, true, [IINACommand.deleteCurrentFile.rawValue], false, nil, nil),
+      (savePlaylist, true, [IINACommand.saveCurrentPlaylist.rawValue], false, nil, nil),
+      (quickSettingsVideo, true, [IINACommand.videoPanel.rawValue], false, nil, nil),
+      (quickSettingsAudio, true, [IINACommand.audioPanel.rawValue], false, nil, nil),
+      (quickSettingsSub, true, [IINACommand.subPanel.rawValue], false, nil, nil),
+      (playlistPanel, true, [IINACommand.playlistPanel.rawValue], false, nil, nil),
+      (chapterPanel, true, [IINACommand.chapterPanel.rawValue], false, nil, nil),
+      (findOnlineSub, true, [IINACommand.findOnlineSubs.rawValue], false, nil, nil),
+      (saveDownloadedSub, true, [IINACommand.saveDownloadedSub.rawValue], false, nil, nil),
+      (flip, true, [IINACommand.flip.rawValue], false, nil, nil),
+      (mirror, true, [IINACommand.mirror.rawValue], false, nil, nil),
+      (biggerSize, true, [IINACommand.biggerWindow.rawValue], false, nil, nil),
+      (smallerSize, true, [IINACommand.smallerWindow.rawValue], false, nil, nil),
+      (fitToScreen, true, [IINACommand.fitToScreen.rawValue], false, nil, nil),
+      (miniPlayer, true, [IINACommand.toggleMusicMode.rawValue], false, nil, nil),
+      (pictureInPicture, true, [IINACommand.togglePIP.rawValue], false, nil, nil),
       (cycleVideoTracks, false, ["cycle", "video"], false, nil, nil),
       (cycleAudioTracks, false, ["cycle", "audio"], false, nil, nil),
       (cycleSubtitles, false, ["cycle", "sub"], false, nil, nil),
@@ -643,8 +856,8 @@ class MenuController: NSObject, NSMenuDelegate {
       (previousChapter, false, ["add", "chapter", "-1"], false, nil, nil),
       (pause, false, ["cycle", "pause"], false, nil, nil),
       (stop, false, ["stop"], false, nil, nil),
-      (forward, false, ["seek", "5"], true, 5.0...10.0, "seek_forward"),
-      (backward, false, ["seek", "-5"], true, -10.0...(-5.0), "seek_backward"),
+      (forward, false, ["seek", "5"], true, 5.0...60.0, "seek_forward"),
+      (backward, false, ["seek", "-5"], true, -60.0...(-5.0), "seek_backward"),
       (nextFrame, false, ["frame-step"], false, nil, nil),
       (previousFrame, false, ["frame-back-step"], false, nil, nil),
       (nextMedia, false, ["playlist-next"], false, nil, nil),
@@ -672,6 +885,8 @@ class MenuController: NSObject, NSMenuDelegate {
       (increaseAudioDelay, false, ["add", "audio-delay", "0.5"], true, nil, "audio_delay_up"),
       (increaseAudioDelaySlightly, false, ["add", "audio-delay", "0.1"], true, nil, "audio_delay_up"),
       (resetAudioDelay, false, ["set", "audio-delay", "0"], true, nil, nil),
+      (hideSubtitles, false, ["cycle", "sub-visibility"], false, nil, nil),
+      (hideSecondSubtitles, false, ["cycle", "secondary-sub-visibility"], false, nil, nil),
       (decreaseSubDelay, false, ["add", "sub-delay", "-0.5"], true, nil, "sub_delay_down"),
       (decreaseSubDelaySlightly, false, ["add", "sub-delay", "-0.1"], true, nil, "sub_delay_down"),
       (increaseSubDelay, false, ["add", "sub-delay", "0.5"], true, nil, "sub_delay_up"),
@@ -681,33 +896,102 @@ class MenuController: NSObject, NSMenuDelegate {
       (decreaseTextSize, false, ["multiply", "sub-scale", "0.9"], true, 0.71...0.99, nil),
       (resetTextSize, false, ["set", "sub-scale", "1"], true, nil, nil),
       (alwaysOnTop, false, ["cycle", "ontop"], false, nil, nil),
-      (fullScreen, false, ["cycle", "fullscreen"], false, nil, nil)
+      (fullScreen, false, ["cycle", "fullscreen"], false, nil, nil),
     ]
 
-    if #available(macOS 10.12, *) {
-      settings.append((pictureInPicture, true, ["toggle-pip"], false, nil, nil))
-    }
+    var otherActionsMenuItems: [NSMenuItem] = []
 
+    /// Loop over all the list of menu items which can be matched with one or more `KeyMapping`s
     settings.forEach { (menuItem, isIINACmd, actions, normalizeLastNum, numRange, l10nKey) in
-      var bound = false
+      /// Loop over all key bindings. Examine each binding's action and see if it is equivalent to `menuItem`'s action
+      var didBindMenuItem = false
       for kb in keyBindings {
         guard kb.isIINACommand == isIINACmd else { continue }
-        let (sameAction, value) = sameKeyAction(kb.action, actions, normalizeLastNum, numRange)
-        if sameAction, let (kEqv, kMdf) = KeyCodeHelper.macOSKeyEquivalent(from: kb.key) {
-          menuItem.keyEquivalent = kEqv
-          menuItem.keyEquivalentModifierMask = kMdf
-          if let value = value, let l10nKey = l10nKey {
-            menuItem.title = String(format: NSLocalizedString("menu." + l10nKey, comment: ""), abs(value))
-            menuItem.representedObject = value
+        let (sameAction, value, extraData) = sameKeyAction(kb.action, actions, normalizeLastNum, numRange)
+        if sameAction, let (kEqv, kMdf) = KeyCodeHelper.macOSKeyEquivalent(from: kb.normalizedMpvKey) {
+          /// If we got here, `KeyMapping`'s action qualifies for being bound to `menuItem`.
+          let kbMenuItem: NSMenuItem
+
+          if didBindMenuItem {
+            /// This `KeyMapping` matches a menu item whose key equivalent was set from a different `KeyMapping`.
+            /// There can only be one key equivalent per menu item, so we will create a duplicate menu item and put it in a hidden menu.
+            kbMenuItem = NSMenuItem(title: menuItem.title, action: menuItem.action, keyEquivalent: "")
+            kbMenuItem.tag = menuItem.tag
+            otherActionsMenuItems.append(kbMenuItem)
+          } else {
+            /// This `KeyMapping` was the first match found for this menu item.
+            kbMenuItem = menuItem
+            didBindMenuItem = true
           }
-          bound = true
-          break
+          updateMenuItem(kbMenuItem, kEqv: kEqv, kMdf: kMdf, l10nKey: l10nKey, value: value, extraData: extraData)
         }
       }
-      if !bound {
-        menuItem.keyEquivalent = ""
-        menuItem.keyEquivalentModifierMask = []
+
+      if !didBindMenuItem {
+        // Need to regenerate `title` and `representedObject` from their default values.
+        // This is needed for the case where the menu item previously matched to a key binding, but now there is no match.
+        // Obviously this is a little kludgey, but it avoids having to do a big refactor and/or writing a bunch of new code.
+        let (_, value, extraData) = sameKeyAction(actions, actions, normalizeLastNum, numRange)
+        updateMenuItem(menuItem, kEqv: "", kMdf: [], l10nKey: l10nKey, value: value, extraData: extraData)
       }
+    }
+
+    updateOtherKeyBindings(replacingAllWith: otherActionsMenuItems)
+  }
+
+  /// Updates the key equivalent of the given menu item.
+  /// May also update its title and representedObject, for items which can change based on some param value(s).
+  private func updateMenuItem(_ menuItem: NSMenuItem, kEqv: String, kMdf: NSEvent.ModifierFlags, l10nKey: String?, value: Double?, extraData: Any?) {
+    menuItem.keyEquivalent = kEqv
+    menuItem.keyEquivalentModifierMask = kMdf
+
+    if let value = value, let l10nKey = l10nKey {
+      let valObj: CVarArg
+      switch l10nKey {
+      case "speed_up",
+        "speed_down":
+        // Title format expects arg type: String
+        valObj = abs(value).string
+      default:
+        // Title format expects numeric arg
+        valObj = abs(value)
+      }
+      menuItem.title = String(format: NSLocalizedString("menu." + l10nKey, comment: ""), valObj)
+      if let extraData = extraData {
+        menuItem.representedObject = (value, extraData)
+      } else {
+        menuItem.representedObject = value
+      }
+    } else {
+      // Clear any previous value
+      menuItem.representedObject = nil
+    }
+  }
+
+  /// Disable all menu items.
+  ///
+  /// This method is used during application termination to stop any further input from the user and when displaying alerts.
+  func disableAllMenus() {
+    isDisabled = true
+    setIsEnabledInAllMenuItems(NSApp.mainMenu!, false)
+  }
+
+  func enableAllMenus() {
+    isDisabled = false
+    setIsEnabledInAllMenuItems(NSApp.mainMenu!, true)
+  }
+
+  /// Set `isEnabled` to the given value in all menu items in the given menu and any submenus.
+  ///
+  /// This method recursively descends through the entire tree of menu items setting `isEnabled` in all items.
+  /// - Parameter menu: Menu to disable or enable.
+  /// - Parameter value: Value to set `isEnabled` to.
+  private func setIsEnabledInAllMenuItems(_ menu: NSMenu, _ value: Bool) {
+    for item in menu.items {
+      if item.hasSubmenu {
+        setIsEnabledInAllMenuItems(item.submenu!, value)
+      }
+      item.isEnabled = value
     }
   }
 }

@@ -21,7 +21,7 @@ class PrefSubViewController: PreferenceViewController, PreferenceWindowEmbeddabl
   }
 
   var preferenceTabImage: NSImage {
-    return NSImage(named: NSImage.Name("pref_sub"))!
+    return makeSymbol("captions.bubble", fallbackImage: "pref_sub")
   }
 
   override var sectionViews: [NSView] {
@@ -38,14 +38,30 @@ class PrefSubViewController: PreferenceViewController, PreferenceWindowEmbeddabl
   @IBOutlet weak var subSourceStackView: NSStackView!
   @IBOutlet weak var subSourcePopUpButton: NSPopUpButton!
 
-  @IBOutlet weak var subLangTokenView: NSTokenField!
+  @IBOutlet weak var subLangTokenView: LanguageTokenField!
   @IBOutlet weak var loginIndicator: NSProgressIndicator!
   @IBOutlet weak var defaultEncodingList: NSPopUpButton!
 
-  private let tokenFieldDelegate = ISO639TokenFieldDelegate()
+  @IBOutlet var subColorWell: NSColorWell!
+  @IBOutlet var subBackgroundColorWell: NSColorWell!
+  @IBOutlet var subBorderColorWell: NSColorWell!
+  @IBOutlet var subShadowColorWell: NSColorWell!
+
+  @IBOutlet weak var subOverrideLevelSlider: NSSlider!
+  @IBOutlet weak var subOverrideLevelSegmentedControl: NSSegmentedControl!
+  @IBOutlet weak var subOverrideLevelText: NSTextField!
+  @IBOutlet weak var subOverrideLevelDescriptiveText: NSTextField!
 
   override func viewDidLoad() {
     super.viewDidLoad()
+
+#if MACOS_13_AVAILABLE
+    if #available(macOS 13.0, *) {
+      [subColorWell, subBackgroundColorWell, subBorderColorWell, subShadowColorWell].forEach {
+        $0.colorWellStyle = .expanded
+      }
+    }
+#endif
 
     let defaultEncoding = Preference.string(for: .defaultEncoding)
     for encoding in AppData.encodings {
@@ -58,11 +74,16 @@ class PrefSubViewController: PreferenceViewController, PreferenceWindowEmbeddabl
     }
 
     defaultEncodingList.menu?.insertItem(NSMenuItem.separator(), at: 1)
-
-    subLangTokenView.delegate = tokenFieldDelegate
     loginIndicator.isHidden = true
 
-    refreshOnlineSubSource()
+    subLangTokenView.commaSeparatedValues = Preference.string(for: .subLang) ?? ""
+
+    refreshSubSources()
+    refreshSubSourceAccessoryView()
+
+    NotificationCenter.default.addObserver(forName: .iinaPluginChanged, object: nil, queue: .main) { [unowned self] _ in
+      self.refreshSubSources()
+    }
   }
 
   @IBAction func chooseSubFontAction(_ sender: AnyObject) {
@@ -80,7 +101,7 @@ class PrefSubViewController: PreferenceViewController, PreferenceWindowEmbeddabl
         self.loginIndicator.isHidden = false
         self.loginIndicator.startAnimation(nil)
         firstly {
-          OpenSubSupport().login(testUser: username, password: password)
+          OpenSub.Fetcher.shared.login(testUser: username, password: password)
         }.map { _ in
           do {
             try KeychainAccess.write(username: username, password: password, forService: .openSubAccount)
@@ -90,7 +111,7 @@ class PrefSubViewController: PreferenceViewController, PreferenceWindowEmbeddabl
           } catch KeychainAccess.KeychainError.unhandledError(let message) {
             Utility.showAlert("sub.cannot_save_passwd", arguments: [message], sheetWindow: self.view.window)
           } catch KeychainAccess.KeychainError.unexpectedData {
-            Utility.showAlert("sub.cannot_save_passwd", arguments: ["Unexcepted data when reading password."], sheetWindow: self.view.window)
+            Utility.showAlert("sub.cannot_save_passwd", arguments: ["Unexpected data when reading password."], sheetWindow: self.view.window)
           }
         }.ensure {
           self.loginIndicator.isHidden = true
@@ -98,10 +119,8 @@ class PrefSubViewController: PreferenceViewController, PreferenceWindowEmbeddabl
         }.catch { err in
           let message: String
           switch err {
-          case OpenSubSupport.OpenSubError.loginFailed(let reason):
+          case OpenSub.Error.loginFailed(let reason):
             message = reason
-          case OpenSubSupport.OpenSubError.xmlRpcError(let e):
-            message = e.readableDescription
           default:
             message = "Unknown error"
           }
@@ -128,21 +147,49 @@ class PrefSubViewController: PreferenceViewController, PreferenceWindowEmbeddabl
     NSWorkspace.shared.open(URL(string: AppData.wikiLink.appending("/Download-Online-Subtitles#assrt"))!)
   }
 
-  @IBAction func onlineSubSourceAction(_ sender: NSPopUpButton) {
-    refreshOnlineSubSource()
+  @IBAction func subOverrideHelpBtnAction(_ sender: Any) {
+    NSWorkspace.shared.open(URL(string: "https://mpv.io/manual/stable/#options-sub-ass-override")!)
   }
 
-  private func refreshOnlineSubSource() {
-    let tag = subSourcePopUpButton.selectedTag()
+  @IBAction func onlineSubSourceAction(_ sender: NSPopUpButton) {
+    refreshSubSourceAccessoryView()
+  }
+
+  @IBAction func preferredLanguageAction(_ sender: LanguageTokenField) {
+    let csv = sender.commaSeparatedValues
+    if Preference.string(for: .subLang) != csv {
+      Logger.log("Saving \(Preference.Key.subLang.rawValue): \"\(csv)\"", level: .verbose)
+      Preference.set(csv, for: .subLang)
+    }
+  }
+
+  private func refreshSubSources() {
+    OnlineSubtitle.populateMenu(subSourcePopUpButton.menu!)
+    let provider = Preference.string(for: .onlineSubProvider)
+    let index = subSourcePopUpButton.menu!.items.firstIndex { $0.representedObject as? String == provider }
+    subSourcePopUpButton.selectItem(at: index ?? 0)
+  }
+
+  private func refreshSubSourceAccessoryView() {
+    let map = [OnlineSubtitle.Providers.openSub.id: 1, OnlineSubtitle.Providers.assrt.id: 2]
+    let id = subSourcePopUpButton.selectedItem?.representedObject as? String ?? ""
     for (index, view) in subSourceStackView.views.enumerated() {
       if index == 0 { continue }
-      subSourceStackView.setVisibilityPriority(index == tag ? .mustHold : .notVisible, for: view)
+      subSourceStackView.setVisibilityPriority(index == map[id] ? .mustHold : .notVisible, for: view)
     }
+  }
+
+  @IBAction func subOverrideLevelSegmentedControlAction(_ sender: NSSegmentedControl) {
+    let keyPath = sender.selectedSegment == 0 ? PK.subOverrideLevel.rawValue : PK.secondarySubOverrideLevel.rawValue
+    subOverrideLevelSlider.bind(.value, to: UserDefaults.standard, withKeyPath: keyPath, options: [.valueTransformer: ASSOverrideLevelValueTransformer()])
+    subOverrideLevelText.bind(.value, to: UserDefaults.standard, withKeyPath: keyPath, options: [.valueTransformer: ASSOverrideLevelTextTransformer()])
+    subOverrideLevelDescriptiveText.bind(.value, to: UserDefaults.standard, withKeyPath: keyPath, options: [.valueTransformer: ASSOverrideLevelDescriptiveTextTransformer()])
   }
 }
 
+// MARK: - Transformers
 
-@objc(ASSOverrideLevelTransformer) class ASSOverrideLevelTransformer: ValueTransformer {
+class ASSOverrideLevelTransformer: ValueTransformer {
 
   static override func allowsReverseTransformation() -> Bool {
     return false
@@ -153,12 +200,74 @@ class PrefSubViewController: PreferenceViewController, PreferenceWindowEmbeddabl
   }
 
   override func transformedValue(_ value: Any?) -> Any? {
-    guard let num = value as? NSNumber else { return nil }
-    return Preference.SubOverrideLevel(rawValue: num.intValue)?.string
+    guard let num = value as? NSNumber,
+          let level = Preference.SubOverrideLevel(rawValue: num.intValue) else { return nil }
+    return level.string
   }
-
 }
 
+@objc(ASSOverrideLevelTextTransformer) class ASSOverrideLevelTextTransformer: ASSOverrideLevelTransformer {
+  override func transformedValue(_ value: Any?) -> Any? {
+    guard let level = super.transformedValue(value) as? String else { return nil }
+    return NSLocalizedString("preference.sub_override_level." + level, comment: level)
+  }
+}
+
+
+@objc(ASSOverrideLevelDescriptiveTextTransformer) class ASSOverrideLevelDescriptiveTextTransformer: ASSOverrideLevelTransformer {
+  override func transformedValue(_ value: Any?) -> Any? {
+    guard let level = super.transformedValue(value) as? String else { return nil }
+    return NSLocalizedString("preference.sub_override_level.descriptive_text." + level, comment: level)
+  }
+}
+
+/// Transform a raw `SubOverrideLevel` enum value into a slider value.
+///
+/// Normally there is a 1 to 1 mapping between an enum value and a slider value. However this is not true for `SubOverrideLevel`.
+/// Originally the only supported values for the `Override level` setting were `yes`, `force` and `strip`. Then `scale` and
+/// `no` were added. The order for the slider now _must_ be `no`, `yes`, `scale`, `force` and `strip`. But to preserve
+/// backward compatibility with enum values stored in user's settings `scale` and `no` were added to the end of the enumeration,
+/// thus requiring a transformation between the slider and enum values as shown in this table:
+///
+/// | Slider | Raw | Enum |
+/// | --- | --- | --- |
+/// | 0 | 4 | no |
+/// | 1 | 0 | yes |
+/// | 2 | 3 | scale |
+/// | 3 | 1 | force |
+/// | 4 | 2 | strip |
+@objc(ASSOverrideLevelValueTransformer) class ASSOverrideLevelValueTransformer: ValueTransformer {
+
+  private static let enumToSlider: [NSNumber: NSNumber] = [0: 1, 1: 3, 2: 4, 3: 2, 4: 0]
+
+  private static let sliderToEnum: [NSNumber: NSNumber] = {
+    var result: [NSNumber: NSNumber] = [:]
+    for (raw, slider) in enumToSlider { result[slider] = raw }
+    return result
+  }()
+
+  override class func allowsReverseTransformation() -> Bool { true }
+
+  override func reverseTransformedValue(_ value: Any?) -> Any? {
+    guard let value = toNumber(value) else { return nil }
+    return ASSOverrideLevelValueTransformer.sliderToEnum[value]
+  }
+
+  override func transformedValue(_ value: Any?) -> Any? {
+    guard let value = toNumber(value) else { return nil }
+    return ASSOverrideLevelValueTransformer.enumToSlider[value]
+  }
+
+  override class func transformedValueClass() -> AnyClass { NSNumber.self }
+
+  private func toNumber(_ value: Any?) -> NSNumber? {
+    guard let value = value as? NSNumber else {
+      guard let value = value as? NSString else { return nil }
+      return value.integerValue as NSNumber
+    }
+    return value
+  }
+}
 
 @objc(OpenSubAccountNameTransformer) class OpenSubAccountNameTransformer: ValueTransformer {
 
@@ -178,9 +287,7 @@ class PrefSubViewController: PreferenceViewController, PreferenceWindowEmbeddabl
       return String(format: NSLocalizedString("preference.logged_in_as", comment: "Logged in as"), username)
     }
   }
-
 }
-
 
 @objc(LoginButtonTitleTransformer) class LoginButtonTitleTransformer: ValueTransformer {
 
@@ -196,5 +303,26 @@ class PrefSubViewController: PreferenceViewController, PreferenceWindowEmbeddabl
     let username = value as? NSString ?? ""
     return NSLocalizedString((username.length == 0 ? "general.login" : "general.logout"), comment: "")
   }
+}
 
+@objc(MPVColorStringTransformer) class MPVColorStringTransformer: ValueTransformer {
+
+  static override func allowsReverseTransformation() -> Bool {
+    return true
+  }
+
+  static override func transformedValueClass() -> AnyClass {
+    return NSString.self
+  }
+
+  // Serializes an NSColor to an mpv-recognized string
+  override func transformedValue(_ value: Any?) -> Any? {
+    guard let mpvColorString = value as? NSString else { return nil }
+    return NSColor(mpvColorString: String(mpvColorString))
+  }
+
+  override func reverseTransformedValue(_ value: Any?) -> Any? {
+    guard let color = value as? NSColor else { return nil }
+    return color.usingColorSpace(.deviceRGB)!.mpvColorString
+  }
 }

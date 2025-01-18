@@ -93,7 +93,7 @@ extern "C" {
  *                MPV_RENDER_PARAM_WL_DISPLAY for Wayland)
  * - nVidia/Linux: Both GLX and EGL should work (GLX is required if vdpau is
  *                 used, e.g. due to old drivers.)
- * - OSX: CGL is required (CGLGetCurrentContext() returning non-NULL)
+ * - macOS: CGL is required (CGLGetCurrentContext() returning non-NULL)
  * - iOS: EAGL is required (EAGLContext.currentContext returning non-nil)
  *
  * Once these things are setup, hardware decoding can be enabled/disabled at
@@ -107,22 +107,19 @@ typedef struct mpv_opengl_init_params {
     /**
      * This retrieves OpenGL function pointers, and will use them in subsequent
      * operation.
-     * Usually, GL context APIs do this for you (e.g. with glXGetProcAddressARB
-     * or wglGetProcAddress), but some APIs do not always return pointers for
-     * all standard functions (even if present); in this case you have to
-     * compensate by looking up these functions yourself and returning them
-     * from this callback.
+     * Usually, you can simply call the GL context APIs from this callback (e.g.
+     * glXGetProcAddressARB or wglGetProcAddress), but some APIs do not always
+     * return pointers for all standard functions (even if present); in this
+     * case you have to compensate by looking up these functions yourself when
+     * libmpv wants to resolve them through this callback.
+     * libmpv will not normally attempt to resolve GL functions on its own, nor
+     * does it link to GL libraries directly.
      */
     void *(*get_proc_address)(void *ctx, const char *name);
     /**
      * Value passed as ctx parameter to get_proc_address().
      */
     void *get_proc_address_ctx;
-    /**
-     * This should not be used. It is deprecated and will be removed or ignored
-     * when the opengl_cb API is removed.
-     */
-    const char *extra_exts;
 } mpv_opengl_init_params;
 
 /**
@@ -147,9 +144,33 @@ typedef struct mpv_opengl_fbo {
     int internal_format;
 } mpv_opengl_fbo;
 
+/**
+ * Deprecated. For MPV_RENDER_PARAM_DRM_DISPLAY.
+ */
 typedef struct mpv_opengl_drm_params {
+    int fd;
+    int crtc_id;
+    int connector_id;
+    struct _drmModeAtomicReq **atomic_request_ptr;
+    int render_fd;
+} mpv_opengl_drm_params;
+
+/**
+ * For MPV_RENDER_PARAM_DRM_DRAW_SURFACE_SIZE.
+ */
+typedef struct mpv_opengl_drm_draw_surface_size {
     /**
-     * DRM fd (int). Set to a negative number if invalid.
+     * size of the draw plane surface in pixels.
+     */
+    int width, height;
+} mpv_opengl_drm_draw_surface_size;
+
+/**
+ * For MPV_RENDER_PARAM_DRM_DISPLAY_V2.
+ */
+typedef struct mpv_opengl_drm_params_v2 {
+    /**
+     * DRM fd (int). Set to -1 if invalid.
      */
     int fd;
 
@@ -172,17 +193,16 @@ typedef struct mpv_opengl_drm_params {
 
     /**
      * DRM render node. Used for VAAPI interop.
-     * Set to a negative number if invalid.
+     * Set to -1 if invalid.
      */
     int render_fd;
-} mpv_opengl_drm_params;
+} mpv_opengl_drm_params_v2;
 
-typedef struct mpv_opengl_drm_osd_size {
-    /**
-     * size of the OSD in pixels.
-     */
-    int width, height;
-} mpv_opengl_drm_osd_size;
+
+/**
+ * For backwards compatibility with the old naming of mpv_opengl_drm_draw_surface_size
+ */
+#define mpv_opengl_drm_osd_size mpv_opengl_drm_draw_surface_size
 
 #ifdef __cplusplus
 }

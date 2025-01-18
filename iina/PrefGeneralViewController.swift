@@ -21,7 +21,7 @@ class PrefGeneralViewController: PreferenceViewController, PreferenceWindowEmbed
   }
 
   var preferenceTabImage: NSImage {
-    return NSImage(named: NSImage.Name("pref_general"))!
+    return makeSymbol("gear", fallbackImage: "pref_general")
   }
 
   override var sectionViews: [NSView] {
@@ -32,7 +32,21 @@ class PrefGeneralViewController: PreferenceViewController, PreferenceWindowEmbed
   @IBOutlet var historyView: NSView!
   @IBOutlet var playlistView: NSView!
   @IBOutlet var screenshotsView: NSView!
-
+  @IBOutlet weak var afterOpenActionBox: NSBox!
+  @IBOutlet weak var pauseActionBox: NSBox!
+  
+  override func viewDidLoad() {
+    super.viewDidLoad()
+    
+    if #available(macOS 10.16, *) {
+      afterOpenActionBox.heightAnchor.constraint(equalToConstant: 42).isActive = true
+      pauseActionBox.heightAnchor.constraint(equalToConstant: 146).isActive = true
+    } else {
+      afterOpenActionBox.heightAnchor.constraint(equalToConstant: 34).isActive = true
+      pauseActionBox.heightAnchor.constraint(equalToConstant: 126).isActive = true
+    }
+  }
+  
   // MARK: - IBAction
 
   @IBAction func chooseScreenshotPathAction(_ sender: AnyObject) {
@@ -44,12 +58,8 @@ class PrefGeneralViewController: PreferenceViewController, PreferenceWindowEmbed
 
   @IBAction func rememberRecentChanged(_ sender: NSButton) {
     if sender.state == .off {
-      NSDocumentController.shared.clearRecentDocuments(self)
+      AppDelegate.shared.clearRecentDocuments(self)
     }
   }
-
-  @IBAction func receiveBetaUpdatesChanged(_ sender: NSButton) {
-    SUUpdater.shared().feedURL = URL(string: sender.state == .on ? AppData.appcastBetaLink : AppData.appcastLink)!
-  }
-
 }
+

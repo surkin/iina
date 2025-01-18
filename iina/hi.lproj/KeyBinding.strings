@@ -1,4 +1,4 @@
-/* 
+/*
   KeyBinding.strings
   iina
 
@@ -32,7 +32,7 @@
 "cmd.screenshot-to-file" = "फाइल करने के लिए स्क्रीनशॉट";
 "cmd.loadfile" = "फाइल लोड करो";
 "cmd.loadlist" = "प्लेलिस्ट लोड करें";
-"cmd.run" = "Run";
+"cmd.run" = "चलाएं";
 
 "iina.flip" = "फ्लिप";
 "iina.mirror" = "आईना";
@@ -52,6 +52,7 @@
 "iina.toggle-flip" = "टॉगल फ्लिप";
 "iina.toggle-mirror" = " टॉगल दर्पण";
 "iina.save-playlist" = "वर्तमान प्लेलिस्ट सहेजें";
+"iina.show-current-file-in-finder" = "Show current file in Finder";
 "iina.delete-current-file" = "वर्तमान फ़ाइल हटाएं";
 "iina.delete-current-file-hard" = "कचरा हटाए बिना सीधे वर्तमान फ़ाइल हटाएं";
 "iina.find-online-subs" = "ऑनलाइन उपशीर्षक खोजें";
@@ -68,14 +69,14 @@
 "backward" = "पिछड़ा";
 "seek-to" = "से";
 
-"relative" = "s";
-"absolute" = "s";
+"relative" = "सै.";
+"absolute" = "सै.";
 "absolute-percent" = "%";
 "relative-percent" = "%";
-"relative+exact" = "s (exact)";
-"relative-percent+exact" = "% (exact)";
-"absolute+keyframe" = "s (keyframe)";
-"absolute-percent+keyframe" = "% (keyframe)";
+"relative+exact" = "से. (सटीक)";
+"relative-percent+exact" = "% (सटीक)";
+"absolute+keyframe" = "से. (मुख्य-फ़्रेम)";
+"absolute-percent+keyframe" = "% (मुख्य-फ़्रेम)";
 
 "opt.pause" = "ठहरें";
 "opt.speed" = "गति";
@@ -100,13 +101,13 @@
 "opt.sub-pos" = "उपशीर्षक स्थिति";
 "opt.sub-scale" = "उपशीर्षक पैमाने";
 "opt.sub-visibility" = "उपशीर्षक दृश्यता";
+"opt.secondary-sub-visibility" = "Secondary subtitle visibility";
 "opt.sub-ass-style-override" = "ASS स्टाइल ओवरराइड";
 
 "opt.fullscreen" = "पूर्ण स्क्रीन";
 "opt.ontop" = "ऊपर तैरता है";
 
 "opt.chapter" = "अध्याय";
-
 
 "read.set" = "सेट {{property}} से {{value}}";
 "read.add" = "{{property}} {{value}}";

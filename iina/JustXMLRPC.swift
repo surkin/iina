@@ -21,6 +21,7 @@ class JustXMLRPC {
     var readableDescription: String {
       return "\(method): [\(httpCode)] \(reason)"
     }
+    var underlyingError: Error?
   }
 
   enum Result {
@@ -60,7 +61,7 @@ class JustXMLRPC {
     methodCall.addChild(params)
     let reqXML = XMLDocument(rootElement: methodCall)
     // Request
-    Just.post(location, requestBody: reqXML.xmlData) { response in
+    Just.post(location, requestBody: reqXML.xmlData, asyncCompletionHandler: { response in
       if response.ok, let content = response.content, let responseDoc = try? XMLDocument(data: content) {
         let rootElement = responseDoc.rootElement()
         if let _ = rootElement?.child("fault") {
@@ -74,9 +75,10 @@ class JustXMLRPC {
         }
       } else {
         // http error
-        callback(.error(XMLRPCError(method: method, httpCode: response.statusCode ?? 0, reason: response.reason)))
+        callback(.error(XMLRPCError(method: method, httpCode: response.statusCode ?? 0,
+                                    reason: response.reason, underlyingError: response.error)))
       }
-    }
+    })
   }
 
   private static func toValueElement(_ value: Any) -> XMLElement {

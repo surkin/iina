@@ -10,14 +10,12 @@ import Cocoa
 
 // MARK: - Touch bar
 
-@available(macOS 10.12.2, *)
 fileprivate extension NSTouchBar.CustomizationIdentifier {
 
   static let windowBar = NSTouchBar.CustomizationIdentifier("\(Bundle.main.bundleIdentifier!).windowTouchBar")
 
 }
 
-@available(macOS 10.12.2, *)
 fileprivate extension NSTouchBarItem.Identifier {
 
   static let playPause = NSTouchBarItem.Identifier("\(Bundle.main.bundleIdentifier!).TouchBarItem.playPause")
@@ -27,7 +25,7 @@ fileprivate extension NSTouchBarItem.Identifier {
   static let rewind = NSTouchBarItem.Identifier("\(Bundle.main.bundleIdentifier!).TouchBarItem.rewind")
   static let fastForward = NSTouchBarItem.Identifier("\(Bundle.main.bundleIdentifier!).TouchBarItem.forward")
   static let time = NSTouchBarItem.Identifier("\(Bundle.main.bundleIdentifier!).TouchBarItem.time")
-  static let remainingTime = NSTouchBarItem.Identifier("\(Bundle.main.bundleIdentifier!).TouchBarItem.remainingTime")
+  static let remainingTimeOrTotalDuration = NSTouchBarItem.Identifier("\(Bundle.main.bundleIdentifier!).TouchBarItem.remainingTimeOrTotalDuration")
   static let ahead15Sec = NSTouchBarItem.Identifier("\(Bundle.main.bundleIdentifier!).TouchBarItem.ahead15Sec")
   static let back15Sec = NSTouchBarItem.Identifier("\(Bundle.main.bundleIdentifier!).TouchBarItem.back15Sec")
   static let ahead30Sec = NSTouchBarItem.Identifier("\(Bundle.main.bundleIdentifier!).TouchBarItem.ahead30Sec")
@@ -39,7 +37,6 @@ fileprivate extension NSTouchBarItem.Identifier {
 }
 
 // Image name, tag, custom label
-@available(macOS 10.12.2, *)
 fileprivate let touchBarItemBinding: [NSTouchBarItem.Identifier: (NSImage.Name, Int, String)] = [
   .ahead15Sec: (NSImage.touchBarSkipAhead15SecondsTemplateName, 15, NSLocalizedString("touchbar.ahead_15", comment: "15sec Ahead")),
   .ahead30Sec: (NSImage.touchBarSkipAhead30SecondsTemplateName, 30, NSLocalizedString("touchbar.ahead_30", comment: "30sec Ahead")),
@@ -53,7 +50,6 @@ fileprivate let touchBarItemBinding: [NSTouchBarItem.Identifier: (NSImage.Name, 
   .fastForward: (NSImage.touchBarFastForwardTemplateName, 1, NSLocalizedString("touchbar.fast_forward", comment: "Fast Forward"))
 ]
 
-@available(macOS 10.12.2, *)
 class TouchBarSupport: NSObject, NSTouchBarDelegate {
 
   private var player: PlayerCore
@@ -62,8 +58,8 @@ class TouchBarSupport: NSObject, NSTouchBarDelegate {
     let touchBar = NSTouchBar()
     touchBar.delegate = self
     touchBar.customizationIdentifier = .windowBar
-    touchBar.defaultItemIdentifiers = [.playPause, .time, .slider, .remainingTime]
-    touchBar.customizationAllowedItemIdentifiers = [.playPause, .slider, .volumeUp, .volumeDown, .rewind, .fastForward, .time, .remainingTime, .ahead15Sec, .ahead30Sec, .back15Sec, .back30Sec, .next, .prev, .togglePIP, .fixedSpaceLarge]
+    touchBar.defaultItemIdentifiers = [.playPause, .time, .slider, .remainingTimeOrTotalDuration]
+    touchBar.customizationAllowedItemIdentifiers = [.playPause, .slider, .volumeUp, .volumeDown, .rewind, .fastForward, .time, .remainingTimeOrTotalDuration, .ahead15Sec, .ahead30Sec, .back15Sec, .back30Sec, .next, .prev, .togglePIP, .fixedSpaceLarge]
     return touchBar
   }()
 
@@ -71,7 +67,7 @@ class TouchBarSupport: NSObject, NSTouchBarDelegate {
   weak var touchBarPlayPauseBtn: NSButton?
   var touchBarPosLabels: [DurationDisplayTextField] = []
   var touchBarPosLabelWidthLayout: NSLayoutConstraint?
-  /** The current/remaining time label in Touch Bar. */
+  /** The current / remaining time/total time label in Touch Bar. */
   lazy var sizingTouchBarTextField: NSTextField = {
     return NSTextField()
   }()
@@ -124,15 +120,19 @@ class TouchBarSupport: NSObject, NSTouchBarDelegate {
       item.customizationLabel = NSLocalizedString("touchbar.time", comment: "Time Position")
       return item
 
-    case .remainingTime:
+    case .remainingTimeOrTotalDuration:
       let item = NSCustomTouchBarItem(identifier: identifier)
       let label = DurationDisplayTextField(labelWithString: "00:00")
       label.alignment = .center
       label.font = .monospacedDigitSystemFont(ofSize: 0, weight: .regular)
-      label.mode = .remaining
+      label.mode = Preference.bool(for: .touchbarShowRemainingTime) ? .remaining : .duration
+      // The baseWritingDirection must be changed from natural (the default) to leftToRight or the
+      // minus sign will be drawn on the right side of the time string when displaying time
+      // remaining in a right-to-left language.
+      label.baseWritingDirection = .leftToRight
       self.touchBarPosLabels.append(label)
       item.view = label
-      item.customizationLabel = NSLocalizedString("touchbar.remainingTime", comment: "Remaining Time Position")
+      item.customizationLabel = NSLocalizedString("touchbar.remainingTimeOrTotalDuration", comment: "Show Remaining Time or Total Duration")
       return item
 
     case .ahead15Sec,
@@ -165,7 +165,7 @@ class TouchBarSupport: NSObject, NSTouchBarDelegate {
   }
 
   func updateTouchBarPlayBtn() {
-    if player.info.isPaused {
+    if player.info.state == .paused {
       touchBarPlayPauseBtn?.image = NSImage(named: NSImage.touchBarPlayTemplateName)
     } else {
       touchBarPlayPauseBtn?.image = NSImage(named: NSImage.touchBarPauseTemplateName)
@@ -173,7 +173,7 @@ class TouchBarSupport: NSObject, NSTouchBarDelegate {
   }
 
   @objc func touchBarPlayBtnAction(_ sender: NSButton) {
-    player.togglePause(nil)
+    player.togglePause()
   }
 
   @objc func touchBarVolumeAction(_ sender: NSButton) {
@@ -223,7 +223,7 @@ class TouchBarSupport: NSObject, NSTouchBarDelegate {
     if let widthConstant = sizingTouchBarTextField.cell?.cellSize.width, !touchBarPosLabels.isEmpty {
       if let posConstraint = touchBarPosLabelWidthLayout {
         posConstraint.constant = widthConstant + pad
-        touchBarPosLabels.forEach { $0.setNeedsDisplay() }
+        touchBarPosLabels.forEach { $0.needsDisplay = true }
       } else {
         for posLabel in touchBarPosLabels {
           let posConstraint = NSLayoutConstraint(item: posLabel, attribute: .width, relatedBy: .equal, toItem: nil, attribute: .notAnAttribute, multiplier: 1.0, constant: widthConstant + pad)
@@ -243,22 +243,18 @@ class TouchBarSupport: NSObject, NSTouchBarDelegate {
   }
 }
 
-@available(macOS 10.12.2, *)
 extension MainWindowController {
 
   override func makeTouchBar() -> NSTouchBar? {
-    return player.touchBarSupport.touchBar
+    return player.makeTouchBar()
   }
-
 }
 
-@available(macOS 10.12.2, *)
 extension MiniPlayerWindowController {
 
   override func makeTouchBar() -> NSTouchBar? {
-    return player.touchBarSupport.touchBar
+    return player.makeTouchBar()
   }
-
 }
 
 // MARK: - Slider
@@ -266,6 +262,7 @@ extension MiniPlayerWindowController {
 class TouchBarPlaySlider: NSSlider {
 
   var isTouching = false
+  var wasPlayingBeforeTouching = false
 
   var playerCore: PlayerCore {
     return (self.window?.windowController as? MainWindowController)?.player ?? .active
@@ -273,13 +270,16 @@ class TouchBarPlaySlider: NSSlider {
 
   override func touchesBegan(with event: NSEvent) {
     isTouching = true
-    playerCore.togglePause(true)
+    wasPlayingBeforeTouching = playerCore.info.state == .playing
+    playerCore.pause()
     super.touchesBegan(with: event)
   }
 
   override func touchesEnded(with event: NSEvent) {
     isTouching = false
-    playerCore.togglePause(false)
+    if (wasPlayingBeforeTouching) {
+      playerCore.resume()
+    }
     super.touchesEnded(with: event)
   }
 
@@ -314,6 +314,18 @@ class TouchBarPlaySliderCell: NSSliderCell {
 
   override var knobThickness: CGFloat {
     return 4
+  }
+
+  /// Initializes and returns a newly allocated `TouchBarPlaySliderCell` object.
+  /// - Important: As per Apple's [Internationalization and Localization Guide](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPInternational/SupportingRight-To-LeftLanguages/SupportingRight-To-LeftLanguages.html)
+  ///     video controllers and timeline indicators should not flip in a right-to-left language.
+  override init() {
+    super.init()
+    userInterfaceLayoutDirection = .leftToRight
+  }
+
+  required init(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
   }
 
   override func barRect(flipped: Bool) -> NSRect {
@@ -351,7 +363,7 @@ class TouchBarPlaySliderCell: NSSliderCell {
 
   override func drawKnob(_ knobRect: NSRect) {
     let info = playerCore.info
-    guard !info.isIdle else { return }
+    guard info.state.active else { return }
     if isTouching, let dur = info.videoDuration?.second, let tb = info.getThumbnail(forSecond: (doubleValue / 100) * dur), let image = tb.image {
       NSGraphicsContext.saveGraphicsState()
       NSBezierPath(roundedRect: knobRect, xRadius: 3, yRadius: 3).setClip()
@@ -379,7 +391,7 @@ class TouchBarPlaySliderCell: NSSliderCell {
 
   override func drawBar(inside rect: NSRect, flipped: Bool) {
     let info = playerCore.info
-    guard !info.isIdle else { return }
+    guard info.state.active else { return }
     let barRect = self.barRect(flipped: flipped)
     if let image = backgroundImage, info.thumbnailsProgress == cachedThumbnailProgress {
       // draw cached background image

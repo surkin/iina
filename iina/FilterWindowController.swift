@@ -46,6 +46,17 @@ class FilterWindowController: NSWindowController, NSWindowDelegate {
   private var currentFilter: MPVFilter?
   private var currentSavedFilter: SavedFilter?
 
+  init(filterType: String, autosaveName: String) {
+    self.filterType = filterType
+    super.init(window: nil)
+    self.windowFrameAutosaveName = autosaveName
+    Logger.log("Init \(windowFrameAutosaveName)", level: .verbose)
+  }
+
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+
   override func windowDidLoad() {
     super.windowDidLoad()
     loaded = true
@@ -60,43 +71,56 @@ class FilterWindowController: NSWindowController, NSWindowDelegate {
     splitView.setPosition(splitView.frame.height - 140, ofDividerAt: 0)
 
     savedFilters = (Preference.array(for: filterType == MPVProperty.af ? .savedAudioFilters : .savedVideoFilters) ?? []).compactMap(SavedFilter.init(dict:))
-    filters = PlayerCore.active.mpv.getFilters(filterType)
+    filters = PlayerCore.lastActive.mpv.getFilters(filterType)
     currentFiltersTableView.reloadData()
     savedFiltersTableView.reloadData()
 
     keyRecordView.delegate = self
     editFilterKeyRecordView.delegate = self
 
+    // Double-click saved filter to edit
+    savedFiltersTableView.doubleAction = #selector(self.editSavedFilterAction(_:))
+
     updateButtonStatus()
 
     // notifications
     let notiName: Notification.Name = filterType == MPVProperty.af ? .iinaAFChanged : .iinaVFChanged
-    NotificationCenter.default.addObserver(self, selector: #selector(reloadTable), name: notiName, object: nil)
+    NotificationCenter.default.addObserver(self, selector: #selector(reloadTableInMainThread), name: notiName, object: nil)
     NotificationCenter.default.addObserver(self, selector: #selector(reloadTable), name: .iinaMainWindowChanged, object: nil)
   }
 
   @objc
-  func reloadTable() {
-    filters = PlayerCore.active.mpv.getFilters(filterType)
-    filterIsSaved = [Bool](repeatElement(false, count: filters.count))
-    savedFilters.forEach { savedFilter in
-      savedFilter.isEnabled = false
-      for (index, filter) in filters.enumerated() {
-        if filter.stringFormat == savedFilter.filterString {
-          filterIsSaved[index] = true
-          savedFilter.isEnabled = true
-          break
-        }
-      }
-    }
+  func reloadTableInMainThread() {
     DispatchQueue.main.async {
-      self.currentFiltersTableView.reloadData()
-      self.savedFiltersTableView.reloadData()
+      self.reloadTable()
     }
   }
 
+  @objc
+  func reloadTable() {
+    let pc = PlayerCore.lastActive
+    // When IINA is terminating player windows are closed, which causes the iinaMainWindowChanged
+    // notification to be posted and that results in the observer established above calling this
+    // method. Thus this method may be called after IINA has commanded mpv to shutdown. Once mpv has
+    // been told to shutdown mpv APIs must not be called as it can trigger a crash in mpv.
+    guard pc.info.state.active else { return }
+    filters = pc.mpv.getFilters(filterType)
+    filterIsSaved = [Bool](repeatElement(false, count: filters.count))
+    savedFilters.forEach { savedFilter in
+      if let asObject = MPVFilter(rawString: savedFilter.filterString),
+         let index = filters.firstIndex(of: asObject) {
+        savedFilter.isEnabled = true
+        filterIsSaved[index] = true
+      } else {
+        savedFilter.isEnabled = false
+      }
+    }
+    currentFiltersTableView.reloadData()
+    savedFiltersTableView.reloadData()
+  }
+
   func setFilters() {
-    PlayerCore.active.mpv.setFilters(filterType, filters: filters)
+    PlayerCore.lastActive.mpv.setFilters(filterType, filters: filters)
   }
 
   deinit {
@@ -105,12 +129,12 @@ class FilterWindowController: NSWindowController, NSWindowDelegate {
 
   func addFilter(_ filter: MPVFilter) -> Bool {
     if filterType == MPVProperty.vf {
-      guard PlayerCore.active.addVideoFilter(filter) else {
+      guard PlayerCore.lastActive.addVideoFilter(filter) else {
         Utility.showAlert("filter.incorrect", sheetWindow: window)
         return false
       }
     } else {
-      guard PlayerCore.active.addAudioFilter(filter) else {
+      guard PlayerCore.lastActive.addAudioFilter(filter) else {
         Utility.showAlert("filter.incorrect", sheetWindow: window)
         return false
       }
@@ -127,8 +151,24 @@ class FilterWindowController: NSWindowController, NSWindowDelegate {
 
   private func syncSavedFilter() {
     Preference.set(savedFilters.map { $0.toDict() }, for: filterType == MPVProperty.af ? .savedAudioFilters : .savedVideoFilters)
-    (NSApp.delegate as? AppDelegate)?.menuController?.updateSavedFilters(forType: filterType, from: savedFilters)
+    AppDelegate.shared.menuController?.updateSavedFilters(forType: filterType, from: savedFilters)
     UserDefaults.standard.synchronize()
+  }
+
+  /// Forms and returns a string representation of the list of configured filters.
+  ///
+  /// The string returned will contain one line for each filter in the list. If there are no filters configured then the string will be empty. The
+  /// string representation returned is intended to be used for developer debugging.
+  /// - Returns: String containing the list of configured filters with a prefix indicating the array index of the filter.
+  private func filtersAsString() -> String {
+    var result = ""
+    for (index, filter) in filters.enumerated() {
+      if !result.isEmpty {
+        result += "\n"
+      }
+      result += "[\(index)] \(String(reflecting: filter))"
+    }
+    return result
   }
 
   // MARK: - IBAction
@@ -140,13 +180,14 @@ class FilterWindowController: NSWindowController, NSWindowDelegate {
   }
 
   @IBAction func removeFilterAction(_ sender: Any) {
-    let pc = PlayerCore.active
-    if currentFiltersTableView.selectedRow >= 0 {
+    let pc = PlayerCore.lastActive
+    let selectedRow = currentFiltersTableView.selectedRow
+    if selectedRow >= 0 {
       let success: Bool
       if filterType == MPVProperty.vf {
-        success = pc.removeVideoFilter(filters[currentFiltersTableView.selectedRow])
+        success = pc.removeVideoFilter(filters[selectedRow], selectedRow)
       } else {
-        success = pc.removeAudioFilter(filters[currentFiltersTableView.selectedRow])
+        success = pc.removeAudioFilter(filters[selectedRow], selectedRow)
       }
       if success {
         reloadTable()
@@ -164,19 +205,55 @@ class FilterWindowController: NSWindowController, NSWindowDelegate {
     saveFilter(filters[row])
   }
 
+  /// User activates or deactivates previously saved audio or video filter
+  /// - Parameter sender: A checkbox in lower portion of filter window
   @IBAction func toggleSavedFilterAction(_ sender: NSButton) {
     let row = savedFiltersTableView.row(for: sender)
-    let filter = savedFilters[row]
-    let pc = PlayerCore.active
-    if sender.state == .on {
-      if pc.addVideoFilter(MPVFilter(rawString: filter.filterString)!) {
-        pc.sendOSD(.addFilter(filter.name))
-      }
+    let savedFilter = savedFilters[row]
+    let pc = PlayerCore.lastActive
+
+    // choose appropriate add/remove functions for .af/.vf
+    var addFilterFunction: (String) -> Bool
+    var removeFilterFunction: (String, Int) -> Bool
+    var removeFilterUsingStringFunction: (String) -> Bool
+    if filterType == MPVProperty.vf {
+      addFilterFunction = pc.addVideoFilter
+      removeFilterFunction = pc.removeVideoFilter
+      removeFilterUsingStringFunction = pc.removeVideoFilter
     } else {
-      if pc.removeVideoFilter(MPVFilter(rawString: filter.filterString)!) {
-        pc.sendOSD(.removeFilter)
+      addFilterFunction = pc.addAudioFilter
+      removeFilterFunction = pc.removeAudioFilter
+      removeFilterUsingStringFunction = pc.removeAudioFilter
+    }
+
+    if sender.state == .on {  // user activated filter
+      if addFilterFunction(savedFilter.filterString) {
+        pc.sendOSD(.addFilter(savedFilter.name))
+      }
+    } else {  // user deactivated filter
+      if let asObject = MPVFilter(rawString: savedFilter.filterString),
+         let index = filters.firstIndex(of: asObject) {
+        // Remove the filter based on the index within the list of configured filters. This is the
+        // preferred way to remove a filter as using the string representation is unreliable due to
+        // filters that take multiple parameters having multiple valid string representations.
+        if removeFilterFunction(savedFilter.filterString, index) {
+          pc.sendOSD(.removeFilter)
+        }
+      } else {
+        // If this occurs the MPVFilter method parseRawParamString may have not been able to parse
+        // this kind of filter. Log the issue and attempt to remove the filter using the string
+        // representation. For filters that have multiple valid string representations mpv may or
+        // may not find and remove the filter.
+        Logger.log("""
+          Failed to locate filter: \(savedFilter.filterString)\nIn the list of filters:
+          \n\(filtersAsString())
+          """, level: .warning)
+        if removeFilterUsingStringFunction(savedFilter.filterString) {
+          pc.sendOSD(.removeFilter)
+        }
       }
     }
+
     reloadTable()
   }
 
@@ -188,11 +265,19 @@ class FilterWindowController: NSWindowController, NSWindowDelegate {
   }
 
   @IBAction func editSavedFilterAction(_ sender: NSButton) {
-    let row = savedFiltersTableView.row(for: sender)
+    var row = savedFiltersTableView.clickedRow  // if double-clicking
+    if row < 0 {
+      row = savedFiltersTableView.row(for: sender)  // If using Edit button
+    }
+    guard row >= 0 && row < savedFiltersTableView.numberOfRows else {
+      Logger.log("Cannot edit saved filter! Invalid row: \(row)", level: .verbose)
+      return
+    }
+    Logger.log("Editing saved filter for row \(row)", level: .verbose)
     currentSavedFilter = savedFilters[row]
     editFilterNameTextField.stringValue = currentSavedFilter!.name
     editFilterStringTextField.stringValue = currentSavedFilter!.filterString
-    editFilterKeyRecordView.currentRawKey = currentSavedFilter!.shortcutKey
+    editFilterKeyRecordView.currentKey = currentSavedFilter!.shortcutKey
     editFilterKeyRecordView.currentKeyModifiers = currentSavedFilter!.shortcutKeyModifiers
     editFilterKeyRecordViewLabel.stringValue = currentSavedFilter!.readableShortCutKey
     window!.beginSheet(editFilterSheet)
@@ -265,7 +350,7 @@ extension FilterWindowController {
     if let currentFilter = currentFilter {
       let filter = SavedFilter(name: saveFilterNameTextField.stringValue,
                                filterString: currentFilter.stringFormat,
-                               shortcutKey: keyRecordView.currentRawKey,
+                               shortcutKey: keyRecordView.currentKey,
                                modifiers: keyRecordView.currentKeyModifiers)
       savedFilters.append(filter)
       reloadTable()
@@ -282,8 +367,7 @@ extension FilterWindowController {
     if let currentFilter = currentSavedFilter {
       currentFilter.name = editFilterNameTextField.stringValue
       currentFilter.filterString = editFilterStringTextField.stringValue
-      // FIXME: shouldn't be shift-modified; should examine this carefully
-      currentFilter.shortcutKey = editFilterKeyRecordView.currentRawKey.lowercased()
+      currentFilter.shortcutKey = editFilterKeyRecordView.currentKey
       currentFilter.shortcutKeyModifiers = editFilterKeyRecordView.currentKeyModifiers
       reloadTable()
       syncSavedFilter()
@@ -298,12 +382,14 @@ extension FilterWindowController {
 
 
 class NewFilterSheetViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSource {
+  private static let textAndTableWidthDifference = 20.0
 
   @IBOutlet weak var filterWindow: FilterWindowController!
   @IBOutlet weak var tableView: NSTableView!
   @IBOutlet weak var scrollContentView: NSView!
   @IBOutlet weak var addButton: NSButton!
-  
+  @IBOutlet weak var presetsClipViewWidthConstraint: NSLayoutConstraint!
+
   private var currentPreset: FilterPreset?
   private var currentBindings: [String: NSControl] = [:]
   private var presets: [FilterPreset] = []
@@ -312,6 +398,25 @@ class NewFilterSheetViewController: NSViewController, NSTableViewDelegate, NSTab
     tableView.dataSource = self
     tableView.delegate = self
     presets = filterWindow.filterType == MPVProperty.vf ? FilterPreset.vfPresets : FilterPreset.afPresets
+
+    // Different locales have different text width requirements. Examine all content and fit table to widest item.
+    var maxWidth = 0.0
+    for preset in presets {
+      let presetString = NSMutableAttributedString(string: preset.localizedName)
+      let fontSize = NSFont.systemFontSize(for: .regular)
+      let textFont = NSFont.systemFont(ofSize: fontSize)
+      presetString.addAttribute(.font, value: textFont, range: NSRange(location: 0, length: presetString.length))
+      let textWidth = presetString.size().width
+      if textWidth > maxWidth {
+        maxWidth = textWidth
+      }
+    }
+    presetsClipViewWidthConstraint.constant = maxWidth + NewFilterSheetViewController.textAndTableWidthDifference
+
+    // Select first filter preset in table if nothing already selected
+    if tableView.selectedRowIndexes.isEmpty {
+      tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+    }
   }
 
   func numberOfRows(in tableView: NSTableView) -> Int {
@@ -334,33 +439,31 @@ class NewFilterSheetViewController: NSViewController, NSTableViewDelegate, NSTab
     scrollContentView.subviews.forEach { $0.removeFromSuperview() }
     addButton.isEnabled = true
 
-    var maxY: CGFloat = 0
+    let stackView = NSStackView()
+    stackView.orientation = .vertical
+    stackView.alignment = .leading
+    stackView.translatesAutoresizingMaskIntoConstraints = false
+    scrollContentView.addSubview(stackView)
+    Utility.quickConstraints(["H:|-4-[v]-4-|", "V:|-4-[v]-4-|"], ["v": stackView])
+
     let generateInputs: (String, FilterParameter) -> Void = { (name, param) in
-      self.scrollContentView.addSubview(self.quickLabel(yPos: maxY, title: preset.localizedParamName(name)))
-      maxY += 21
-      let input = self.quickInput(yPos: &maxY, param: param)
+      stackView.addArrangedSubview(self.quickLabel(title: preset.localizedParamName(name)))
+      let input = self.quickInput(param: param)
       // For preventing crash due to adding a filter with no name:
       if name == "name", preset.name.starts(with: "custom_"), let textField = input as? NSTextField {
         textField.delegate = self
         self.addButton.isEnabled = !textField.stringValue.isEmpty
       }
-      self.scrollContentView.addSubview(input)
+      stackView.addArrangedSubview(input)
       self.currentBindings[name] = input
     }
-    if let paramOrder = preset.paramOrder {
-      for name in paramOrder {
-        generateInputs(name, preset.params[name]!)
-      }
-    } else {
-      for (name, param) in preset.params {
-        generateInputs(name, param)
-      }
+    for name in preset.paramOrder {
+      generateInputs(name, preset.params[name]!)
     }
-    scrollContentView.frame.size.height = maxY
   }
 
-  private func quickLabel(yPos: CGFloat, title: String) -> NSTextField {
-    let label = NSTextField(frame: NSRect(x: 0, y: yPos,
+  private func quickLabel(title: String) -> NSTextField {
+    let label = NSTextField(frame: NSRect(x: 0, y: 0,
                                           width: scrollContentView.frame.width,
                                           height: 17))
     label.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
@@ -369,15 +472,18 @@ class NewFilterSheetViewController: NSViewController, NSTableViewDelegate, NSTab
     label.isBezeled = false
     label.isSelectable = false
     label.isEditable = false
+    label.usesSingleLineMode = false
+    label.lineBreakMode = .byWordWrapping
+    label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
     return label
   }
 
   /** Create the control from a `FilterParameter` definition. */
-  private func quickInput(yPos: inout CGFloat, param: FilterParameter) -> NSControl {
+  private func quickInput(param: FilterParameter) -> NSControl {
     switch param.type {
     case .text:
       // Text field
-      let label = NSTextField(frame: NSRect(x: 4, y: yPos,
+      let label = NSTextField(frame: NSRect(x: 0, y: 0,
                               width: scrollContentView.frame.width - 8,
                               height: 22))
       label.stringValue = param.defaultValue.stringValue
@@ -386,41 +492,36 @@ class NewFilterSheetViewController: NSViewController, NSTableViewDelegate, NSTab
       label.lineBreakMode = .byClipping
       label.usesSingleLineMode = true
       label.cell?.isScrollable = true
-      yPos += 22 + 8
       return label
     case .int:
       // Slider
-      let slider = NSSlider(frame: NSRect(x: 4, y: yPos,
+      let slider = NSSlider(frame: NSRect(x: 0, y: 0,
                                           width: scrollContentView.frame.width - 8,
                                           height: 19))
       slider.minValue = Double(param.minInt!)
       slider.maxValue = Double(param.maxInt!)
-      yPos += 19 + 8
       if let step = param.step {
         slider.numberOfTickMarks = (param.maxInt! - param.minInt!) / step + 1
         slider.allowsTickMarkValuesOnly = true
         slider.frame.size.height = 24
-        yPos += 5
       }
       slider.intValue = Int32(param.defaultValue.intValue)
       return slider
     case .float:
       // Slider
-      let slider = NSSlider(frame: NSRect(x: 4, y: yPos,
+      let slider = NSSlider(frame: NSRect(x: 0, y: 0,
                                           width: scrollContentView.frame.width - 8,
                                           height: 19))
       slider.minValue = Double(param.min!)
       slider.maxValue = Double(param.max!)
       slider.floatValue = param.defaultValue.floatValue
-      yPos += 19 + 8
       return slider
     case .choose:
       // Choose
-      let popupBtn = NSPopUpButton(frame: NSRect(x: 4, y: yPos,
+      let popupBtn = NSPopUpButton(frame: NSRect(x: 0, y: 0,
                                                  width: scrollContentView.frame.width - 8,
                                                  height: 26))
       popupBtn.addItems(withTitles: param.choices)
-      yPos += 26 + 8
       return popupBtn
     }
   }
@@ -444,7 +545,7 @@ class NewFilterSheetViewController: NSViewController, NSTableViewDelegate, NSTab
     }
     // create filter
     if filterWindow.addFilter(preset.transformer(instance)) {
-      PlayerCore.active.sendOSD(.addFilter(preset.localizedName))
+      PlayerCore.lastActive.sendOSD(.addFilter(preset.localizedName))
     }
   }
 

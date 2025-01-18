@@ -20,34 +20,44 @@ class PrefCodecViewController: PreferenceViewController, PreferenceWindowEmbedda
   }
 
   var preferenceTabImage: NSImage {
-    return NSImage(named: NSImage.Name("pref_av"))!
+    return makeSymbol("play.rectangle.on.rectangle", fallbackImage: "pref_av")
   }
 
   override var sectionViews: [NSView] {
-    return [sectionVideoView, sectionAudioView]
+    return [sectionVideoView, sectionAudioView, sectionReplayGainView]
   }
 
   @IBOutlet var sectionVideoView: NSView!
   @IBOutlet var sectionAudioView: NSView!
+  @IBOutlet var sectionReplayGainView: NSView!
+  
+  @IBOutlet weak var audioDriverExperimentalIndicator: NSImageView!
 
   @IBOutlet weak var spdifAC3Btn: NSButton!
   @IBOutlet weak var spdifDTSBtn: NSButton!
   @IBOutlet weak var spdifDTSHDBtn: NSButton!
   @IBOutlet weak var hwdecDescriptionTextField: NSTextField!
-  @IBOutlet weak var audioLangTokenField: NSTokenField!
+  @IBOutlet weak var audioLangTokenField: LanguageTokenField!
 
   @IBOutlet weak var audioDevicePopUp: NSPopUpButton!
 
-  private let tokenFieldDelegate = ISO639TokenFieldDelegate()
+  @IBOutlet weak var enableToneMappingBtn: NSButton!
+  @IBOutlet weak var toneMappingTargetPeakTextField: NSTextField!
+  @IBOutlet weak var toneMappingAlgorithmPopUpBtn: NSPopUpButton!
 
   override func viewDidLoad() {
     super.viewDidLoad()
-    audioLangTokenField.delegate = tokenFieldDelegate
+    audioLangTokenField.commaSeparatedValues = Preference.string(for: .audioLanguage) ?? ""
     updateHwdecDescription()
+    updateToneMappingUI()
   }
 
   override func viewWillAppear() {
     super.viewWillAppear()
+    
+    if #available(macOS 14.0, *) {
+      audioDriverExperimentalIndicator.image = NSImage.findSFSymbol(["flask.fill"])
+    }
 
     audioDevicePopUp.removeAllItems()
     let audioDevices = PlayerCore.active.getAudioDevices()
@@ -88,9 +98,56 @@ class PrefCodecViewController: PreferenceViewController, PreferenceWindowEmbedda
     updateHwdecDescription()
   }
 
+  @IBAction func preferredLanguageAction(_ sender: LanguageTokenField) {
+    let csv = sender.commaSeparatedValues
+    if Preference.string(for: .audioLanguage) != csv {
+      Logger.log("Saving \(Preference.Key.audioLanguage.rawValue): \"\(csv)\"", level: .verbose)
+      Preference.set(csv, for: .audioLanguage)
+    }
+  }
+
   private func updateHwdecDescription() {
     let hwdec: Preference.HardwareDecoderOption = Preference.enum(for: .hardwareDecoder)
     hwdecDescriptionTextField.stringValue = hwdec.localizedDescription
   }
 
+  // Prefs → UI
+  private func updateToneMappingUI() {
+    toneMappingTargetPeakTextField.integerValue = Preference.integer(for: .toneMappingTargetPeak)
+  }
+
+  @IBAction func toneMappingTargetPeakAction(_ sender: NSTextField) {
+    defer {
+      updateToneMappingUI()
+    }
+    let newValue = sender.integerValue
+    // constrain to valid mpv values
+    let isValueValid = newValue == 0 || (newValue >= 10 && newValue <= 10000)
+    guard isValueValid else {
+      Utility.showAlert("target_peak.bad_value", arguments: [String(newValue)], sheetWindow: view.window)
+      sender.integerValue = Preference.integer(for: .toneMappingTargetPeak)
+      return
+    }
+    Preference.set(newValue, for: .toneMappingTargetPeak)
+  }
+
+  @IBAction func toneMappingHelpAction(_ sender: Any) {
+    NSWorkspace.shared.open(URL(string: AppData.toneMappingHelpLink)!)
+  }
+
+  @IBAction func targetPeakHelpAction(_ sender: Any) {
+    NSWorkspace.shared.open(URL(string: AppData.targetPeakHelpLink)!)
+  }
+
+  @IBAction func algorithmHelpAction(_ sender: Any) {
+    NSWorkspace.shared.open(URL(string: AppData.algorithmHelpLink)!)
+  }
+
+  @IBAction func gainAdjustmentHelpAction(_ sender: Any) {
+    NSWorkspace.shared.open(URL(string: AppData.gainAdjustmentHelpLink)!)
+  }
+
+  @IBAction func audioDriverHelpAction(_ sender: Any) {
+    NSWorkspace.shared.open(URL(string: AppData.audioDriverHellpLink)!)
+  }
 }

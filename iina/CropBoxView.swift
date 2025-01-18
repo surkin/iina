@@ -9,20 +9,8 @@
 import Cocoa
 
 fileprivate extension NSColor {
-  static let cropBoxFill: NSColor = {
-    if #available(macOS 10.14, *) {
-      return NSColor(named: .cropBoxFill)!
-    } else {
-      return NSColor(calibratedWhite: 0.5, alpha: 0.3)
-    }
-  }()
-  static let cropBoxBorder: NSColor = {
-    if #available(macOS 10.14, *) {
-      return .controlAccentColor
-    } else {
-      return NSColor(calibratedRed: 0.4, green: 0.6, blue: 1, alpha: 1)
-    }
-  }()
+  static let cropBoxFill = NSColor(named: .cropBoxFill)!
+  static let cropBoxBorder = NSColor.controlAccentColor
 }
 
 class CropBoxView: NSView {
@@ -54,7 +42,7 @@ class CropBoxView: NSView {
     case top, bottom, left, right
   }
 
-  // top and botom are related to view's coordinate
+  // top and bottom are related to view's coordinate
   private var rectTop: NSRect!
   private var rectBottom: NSRect!
   private var rectLeft: NSRect!
@@ -205,7 +193,6 @@ class CropBoxView: NSView {
     path.lineWidth = 2
     path.fill()
     path.stroke()
-
   }
 
   // MARK: - Cursor rects
@@ -220,13 +207,12 @@ class CropBoxView: NSView {
   func updateCursorRects() {
     let x = boxRect.origin.x
     let y = boxRect.origin.y
-    let w = boxRect.width
-    let h = boxRect.height
-
-    rectTop = NSMakeRect(x, y-2, w, 4)
-    rectBottom = NSMakeRect(x, y+h-2, w, 4)
-    rectLeft = NSMakeRect(x-2, y+2, 4, h-4)
-    rectRight = NSMakeRect(x+w-2, y+2, 4, h-4)
+    let w = boxRect.size.width
+    let h = boxRect.size.height
+    rectTop = NSMakeRect(x, y-2, w, 4).standardized
+    rectBottom = NSMakeRect(x, y+h-2, w, 4).standardized
+    rectLeft = NSMakeRect(x-2, y+2, 4, h-4).standardized
+    rectRight = NSMakeRect(x+w-2, y+2, 4, h-4).standardized
 
     window?.invalidateCursorRects(for: self)
   }
